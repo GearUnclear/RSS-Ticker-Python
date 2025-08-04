@@ -27,7 +27,7 @@ FEED_URLS = [
     # "https://rss.nytimes.com/services/xml/rss/nyt/US.xml",
     # "https://rss.nytimes.com/services/xml/rss/nyt/NYRegion.xml",
     # "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
-    # "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
     # "https://rss.nytimes.com/services/xml/rss/nyt/Sports.xml",
     # "https://rss.nytimes.com/services/xml/rss/nyt/Science.xml",
     # "https://rss.nytimes.com/services/xml/rss/nyt/Health.xml",
@@ -52,7 +52,7 @@ FEED_URLS = [
     # "https://rss.nytimes.com/services/xml/rss/nyt/YourMoney.xml",
     
     # TECHNOLOGY SUB-SECTIONS:
-    # "https://rss.nytimes.com/services/xml/rss/nyt/PersonalTech.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/PersonalTech.xml",
     
     # SPORTS SUB-SECTIONS:
     # "https://rss.nytimes.com/services/xml/rss/nyt/Baseball.xml",
