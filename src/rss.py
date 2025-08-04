@@ -166,7 +166,8 @@ class TickerGUI:
         self.headlines = deque([("(Loading NYT Politics...)" + BULLET, "")])
         self.current_index = 0
         self.paused = False
-        self.current_url = ""
+        self.text_items = []  # List of {'id': canvas_id, 'url': url, 'x': position}
+        self.min_gap = 80  # Minimum gap between headlines in pixels
         
         # Setup window
         self.root = tk.Tk()
@@ -224,16 +225,7 @@ class TickerGUI:
             debug_print(f"Font {FONT_FAMILY} not available, using default")
             self.font = tkfont.Font(family="TkDefaultFont", size=FONT_SIZE)
         
-        # Create text item
-        self.text_x = float(self.screen_width)
         self.text_y = TICKER_HEIGHT_PX // 2
-        self.text_id = self.canvas.create_text(
-            self.text_x, self.text_y,
-            text="(Initializing...)" + BULLET,
-            font=self.font,
-            fill=FG_COLOR,
-            anchor="w"
-        )
         
         # Pause indicator
         self.pause_id = self.canvas.create_text(
@@ -278,9 +270,8 @@ class TickerGUI:
                         self.headlines.clear()
                         self.headlines.extend(data)
                         self.current_index = 0
-                        # Load new content if we're showing loading message
-                        current_text = self.canvas.itemcget(self.text_id, "text")
-                        if "Loading" in current_text or "Error" in current_text:
+                        # If we have no active items, load the first one
+                        if not self.text_items:
                             self.load_next_item()
                     
                     elif msg_type == 'error':
@@ -297,8 +288,45 @@ class TickerGUI:
         # Schedule next check
         self.root.after(500, self.check_updates)
 
+    def should_load_next(self):
+        """Check if we should load the next headline."""
+        if not self.text_items:
+            return True
+        
+        # Get the rightmost (most recently added) item
+        rightmost_item = self.text_items[-1]
+        
+        # Don't load another item for at least 0.5 seconds after the last one
+        if time.time() - rightmost_item.get('load_time', 0) < 0.5:
+            return False
+        
+        # We need to check if the RIGHT EDGE of the last headline has moved
+        # far enough LEFT to make room for a new headline with proper spacing
+        try:
+            bbox = self.canvas.bbox(rightmost_item['id'])
+            if bbox:
+                # bbox[2] is the right edge of the text
+                right_edge = bbox[2]
+                # Load next when right edge is at least min_gap pixels from screen edge
+                should_load = right_edge <= (self.screen_width - self.min_gap)
+                if DEBUG and should_load:
+                    debug_print(f"Loading next: right_edge={right_edge}, threshold={self.screen_width - self.min_gap}")
+                return should_load
+        except Exception:
+            # Fallback: estimate based on position and text length
+            current_text = self.canvas.itemcget(rightmost_item['id'], "text")
+            # Better estimation: ~0.6 * font_size per character for monospace
+            estimated_width = len(current_text) * (FONT_SIZE * 0.6)
+            right_edge = rightmost_item['x'] + estimated_width
+            should_load = right_edge <= (self.screen_width - self.min_gap)
+            if DEBUG and should_load:
+                debug_print(f"Loading next (est): right_edge={right_edge}, threshold={self.screen_width - self.min_gap}")
+            return should_load
+        
+        return False
+
     def load_next_item(self):
-        """Load the next headline."""
+        """Load the next headline as a new text item."""
         try:
             if not self.headlines:
                 return
@@ -307,42 +335,63 @@ class TickerGUI:
             idx = self.current_index % len(self.headlines)
             text, url = self.headlines[idx]
             self.current_index = idx + 1
-            self.current_url = url
             
             debug_print(f"Loading item {idx}: {text[:50]}...")
             
-            # Update text
-            self.canvas.itemconfig(self.text_id, text=text)
+            # Create new text item
+            text_id = self.canvas.create_text(
+                float(self.screen_width), self.text_y,
+                text=text,
+                font=self.font,
+                fill=FG_COLOR,
+                anchor="w"
+            )
             
-            # Reset position
-            self.text_x = float(self.screen_width)
-            self.canvas.coords(self.text_id, self.text_x, self.text_y)
+            # Add to our tracking list
+            self.text_items.append({
+                'id': text_id,
+                'url': url,
+                'x': float(self.screen_width),
+                'load_time': time.time()  # Track when loaded to prevent immediate reloading
+            })
             
         except Exception as e:
             debug_print(f"Error loading next item: {e}")
             traceback.print_exc()
 
     def scroll_text(self):
-        """Scroll the text across the screen."""
+        """Scroll all text items across the screen."""
         try:
             if not self.paused:
-                # Move text
-                self.text_x -= PIXELS_PER_STEP
-                self.canvas.coords(self.text_id, self.text_x, self.text_y)
+                # Move all text items
+                items_to_remove = []
                 
-                # Check if we need to load next item
-                try:
-                    # Get text bounds
-                    bbox = self.canvas.bbox(self.text_id)
-                    if bbox and bbox[2] < 0:  # Right edge of text is off screen
-                        debug_print("Text scrolled off, loading next")
-                        self.load_next_item()
-                except Exception as bbox_error:
-                    # Fallback: estimate based on position
-                    current_text = self.canvas.itemcget(self.text_id, "text")
-                    estimated_width = len(current_text) * 8  # Rough estimate
-                    if self.text_x + estimated_width < 0:
-                        self.load_next_item()
+                for item in self.text_items:
+                    # Move text
+                    item['x'] -= PIXELS_PER_STEP
+                    self.canvas.coords(item['id'], item['x'], self.text_y)
+                    
+                    # Check if item has scrolled completely off screen
+                    try:
+                        bbox = self.canvas.bbox(item['id'])
+                        if bbox and bbox[2] < 0:  # Right edge is off screen
+                            items_to_remove.append(item)
+                    except Exception:
+                        # Fallback: estimate based on position
+                        current_text = self.canvas.itemcget(item['id'], "text")
+                        estimated_width = len(current_text) * 8
+                        if item['x'] + estimated_width < 0:
+                            items_to_remove.append(item)
+                
+                # Remove items that have scrolled off
+                for item in items_to_remove:
+                    debug_print("Removing text that scrolled off screen")
+                    self.canvas.delete(item['id'])
+                    self.text_items.remove(item)
+                
+                # Load next item if there's room
+                if self.should_load_next():
+                    self.load_next_item()
                         
         except Exception as e:
             debug_print(f"Error in scroll: {e}")
@@ -360,10 +409,34 @@ class TickerGUI:
         debug_print(f"Pause toggled: {self.paused}")
 
     def open_link(self, event):
-        """Open the current URL in browser."""
-        if self.current_url:
-            debug_print(f"Opening URL: {self.current_url}")
-            webbrowser.open(self.current_url)
+        """Open the URL of the clicked headline."""
+        try:
+            # Find which text item was clicked
+            clicked_item = None
+            click_x = event.x
+            
+            for item in self.text_items:
+                try:
+                    bbox = self.canvas.bbox(item['id'])
+                    if bbox and bbox[0] <= click_x <= bbox[2]:
+                        clicked_item = item
+                        break
+                except Exception:
+                    # Fallback: check if click is roughly in the item's area
+                    current_text = self.canvas.itemcget(item['id'], "text")
+                    estimated_width = len(current_text) * 8
+                    if item['x'] <= click_x <= item['x'] + estimated_width:
+                        clicked_item = item
+                        break
+            
+            if clicked_item and clicked_item['url']:
+                debug_print(f"Opening URL: {clicked_item['url']}")
+                webbrowser.open(clicked_item['url'])
+            else:
+                debug_print("No clickable item found at click position")
+                
+        except Exception as e:
+            debug_print(f"Error in open_link: {e}")
 
     def maintain_topmost(self):
         """Keep window on top (less aggressive for Windows)."""
