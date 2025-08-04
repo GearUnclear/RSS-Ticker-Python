@@ -7,6 +7,7 @@ from collections import deque
 import queue
 import time
 import webbrowser
+from datetime import date
 from typing import List, Dict, Optional, Tuple
 
 try:
@@ -37,7 +38,8 @@ class TickerGUI:
     
     def __init__(self, update_queue: queue.Queue):
         self.update_queue = update_queue
-        self.headlines = deque([(f"(Loading NYT Politics...){BULLET}", "")])
+        today_str = date.today().strftime("%B %d, %Y")
+        self.headlines = deque([(f"🗞️ BREAKING: Loading Today's Premium NYT Coverage for {today_str} • Stay Informed with Real-Time News Updates {BULLET}", "")])
         self.current_index = 0
         self.paused = False
         self.text_items: List[Dict] = []
