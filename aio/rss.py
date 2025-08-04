@@ -7,6 +7,10 @@ nyt_ticker.py — NYT Politics RSS ticker (Windows 11 Fixed)
 • Smooth sub-pixel scrolling.
 • ⏸ icon when paused; <Space> toggles play/pause (right-click still works).
 • Resilient fetch loop with exponential back-off and headline deduplication.
+
+DEPRECATION NOTICE: This file has been refactored into separate modules.
+Please use src/main.py or src/rss_wrapper.py instead.
+The original code is preserved below for reference.
 """
 
 import itertools

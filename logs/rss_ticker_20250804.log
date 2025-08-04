@@ -1,0 +1,7 @@
+2025-08-04 13:37:26,126 - rss_ticker - INFO - Starting NYT Politics RSS ticker
+2025-08-04 13:37:26,127 - rss_ticker - INFO - Feed fetch loop started
+2025-08-04 13:37:26,128 - rss_ticker - INFO - Feed fetcher thread started
+2025-08-04 13:37:26,490 - rss_ticker - INFO - Starting GUI mainloop
+2025-08-04 13:37:26,543 - rss_ticker - INFO - Successfully parsed feed with 20 entries
+2025-08-04 13:37:26,556 - rss_ticker - INFO - Processed 20 unique items
+2025-08-04 13:37:26,557 - rss_ticker - INFO - Sent 20 items to GUI
