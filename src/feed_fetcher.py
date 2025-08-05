@@ -23,6 +23,7 @@ try:
     from .exceptions import FeedFetchError, FeedParseError
     from .logger import logger
     from .utils import format_entry, format_error_message
+    from .article_memory import ArticleMemory
 except ImportError:
     # Fallback for direct execution
     from config import (
@@ -34,6 +35,7 @@ except ImportError:
     from exceptions import FeedFetchError, FeedParseError
     from logger import logger
     from utils import format_entry, format_error_message
+    from article_memory import ArticleMemory
 
 
 class FeedFetcher:
@@ -49,6 +51,10 @@ class FeedFetcher:
         # Article pool with priority tracking
         self.article_pool: List[Dict] = []
         self.display_cycle_count = 0
+        
+        # Long-term article memory across sessions
+        self.article_memory = ArticleMemory()
+        logger.info(f"Article memory initialized: {self.article_memory.get_memory_stats()}")
         
     def start(self):
         """Start the feed fetching thread."""
@@ -371,42 +377,65 @@ class FeedFetcher:
             
         return sleep_sec
     
-    def _calculate_priority_score(self, article: Dict) -> float:
+    def _calculate_priority_score(self, article: Dict, adaptive_mode: bool = False) -> float:
         """
         Calculate priority score for an article based on age and display history.
         
         Args:
             article: Article dictionary with metadata
+            adaptive_mode: If True, use reduced cooldown for emergency variety
             
         Returns:
             Priority score (higher = more likely to be shown)
         """
         now = datetime.now()
+        url = article.get('url', '')
         
-        # New article gets maximum priority
+        # Check if article was recently shown in previous sessions
+        recently_shown_globally = self.article_memory.was_recently_shown(url)
+        
+        # New article gets maximum priority, but penalized if shown recently in another session
         if article['display_count'] == 0:
             hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
+            
             if hours_since_fetch < 0.5:  # Very fresh (< 30 minutes)
-                return NEW_ARTICLE_PRIORITY
+                base_score = NEW_ARTICLE_PRIORITY
             elif hours_since_fetch < 2:  # Recent (< 2 hours)
-                return NEW_ARTICLE_PRIORITY * 0.9
-            else:  # Older but unseen
-                return NEW_ARTICLE_PRIORITY * 0.7
+                base_score = NEW_ARTICLE_PRIORITY * 0.9
+            else:  # Older but unseen in this session
+                base_score = NEW_ARTICLE_PRIORITY * 0.7
+                
+            # Penalty for articles shown in previous sessions
+            if recently_shown_globally:
+                base_score *= 0.3  # Significant penalty but not zero
+                logger.debug(f"Article {url[:50]}... penalized for recent global display")
+                
+            return base_score
         
+        # Determine effective cooldown period (adaptive mode reduces it)
+        effective_cooldown = MIN_COOLDOWN_CYCLES
+        if adaptive_mode:
+            effective_cooldown = max(1, MIN_COOLDOWN_CYCLES - 1)  # Reduce by 1, minimum 1
+            
         # Previously shown articles have zero priority during cooldown
         cycles_since_display = self.display_cycle_count - article['last_displayed_cycle']
-        if cycles_since_display < MIN_COOLDOWN_CYCLES:
+        if cycles_since_display < effective_cooldown:
             return 0  # Zero priority during cooldown - prevents selection
         
         # Gradual priority recovery after cooldown
-        cooldown_bonus = min(cycles_since_display - MIN_COOLDOWN_CYCLES, 10) * 3
+        cooldown_bonus = min(cycles_since_display - effective_cooldown, 10) * 3
         base_priority = 30 + cooldown_bonus  # Higher base to compete with new articles
         
         # Age penalty for older articles
         hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
         age_penalty = min(hours_since_fetch / PRIORITY_DECAY_HOURS, 1) * 15
         
-        return max(base_priority - age_penalty, 10)  # Minimum priority of 10
+        # Additional penalty for globally recent articles
+        final_priority = max(base_priority - age_penalty, 10)  # Minimum priority of 10
+        if recently_shown_globally:
+            final_priority *= 0.5  # Half priority for globally recent articles
+            
+        return final_priority
     
     def _update_article_pool(self, new_articles: List[Tuple[str, str, str]]):
         """
@@ -443,10 +472,16 @@ class FeedFetcher:
             logger.debug(f"Removed {removed_count} low-priority articles from pool")
         
         logger.info(f"Article pool updated: {len(self.article_pool)} articles total")
+        
+        # Log detailed pool statistics every 5 cycles
+        if self.display_cycle_count % 5 == 0:
+            pool_stats = self.get_pool_statistics()
+            logger.info(f"Pool stats: {pool_stats}")
     
     def _select_articles_for_display(self) -> List[Tuple[str, str, str]]:
         """
         Select articles for display using breaking news bias and priority scoring.
+        Implements adaptive cooldown when running low on variety.
         
         Returns:
             List of (display_text, url, description) tuples selected for display
@@ -454,17 +489,30 @@ class FeedFetcher:
         if not self.article_pool:
             return []
         
-        # Calculate priority scores for all articles and filter out zero-priority
+        # First pass: try normal priority scoring
         scored_articles = []
         for article in self.article_pool:
-            score = self._calculate_priority_score(article)
+            score = self._calculate_priority_score(article, adaptive_mode=False)
             if score > 0:  # Only include articles with positive priority
                 scored_articles.append((article, score))
         
-        logger.debug(f"Available articles for selection: {len(scored_articles)}/{len(self.article_pool)}")
+        # Check if we need emergency variety mode (adaptive cooldown)
+        adaptive_mode = len(scored_articles) < 5  # Emergency threshold
+        
+        if adaptive_mode:
+            logger.warning(f"Emergency variety mode activated: only {len(scored_articles)} articles available")
+            # Recalculate with adaptive mode (reduced cooldown)
+            scored_articles = []
+            for article in self.article_pool:
+                score = self._calculate_priority_score(article, adaptive_mode=True)
+                if score > 0:
+                    scored_articles.append((article, score))
+            logger.info(f"Adaptive mode increased available articles to: {len(scored_articles)}")
+        
+        logger.debug(f"Available articles for selection: {len(scored_articles)}/{len(self.article_pool)} (adaptive={adaptive_mode})")
         
         if not scored_articles:
-            logger.warning("No articles available for selection (all in cooldown)")
+            logger.error("No articles available even in emergency mode - all articles exhausted")
             return []
         
         # Sort by priority score (highest first)
@@ -507,12 +555,64 @@ class FeedFetcher:
         for article in selected_articles:
             article['display_count'] += 1
             article['last_displayed_cycle'] = self.display_cycle_count
+            
+            # Mark article in global memory
+            url = article.get('url', '')
+            if url:
+                self.article_memory.mark_article_shown(url)
         
         # Convert back to tuple format
         result = [(article['display_text'], article['url'], article['description']) 
                  for article in selected_articles]
         
-        logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count})")
+        logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count}, adaptive={adaptive_mode})")
         logger.debug(f"Available for selection: {len(scored_articles)}, High priority: {len([x for x in scored_articles if x[1] >= 60])}")
         
-        return result 
+        # Log memory stats periodically
+        if self.display_cycle_count % 10 == 0:
+            memory_stats = self.article_memory.get_memory_stats()
+            logger.info(f"Article memory stats: {memory_stats}")
+        
+        return result
+    
+    def get_pool_statistics(self) -> Dict:
+        """Get detailed statistics about the article pool state."""
+        if not self.article_pool:
+            return {
+                'total_articles': 0,
+                'new_articles': 0,
+                'articles_in_cooldown': 0,
+                'available_articles': 0,
+                'globally_recent_articles': 0
+            }
+        
+        stats = {
+            'total_articles': len(self.article_pool),
+            'new_articles': 0,
+            'articles_in_cooldown': 0,
+            'available_articles': 0,
+            'globally_recent_articles': 0
+        }
+        
+        for article in self.article_pool:
+            url = article.get('url', '')
+            
+            # Check if new (never displayed in current session)
+            if article['display_count'] == 0:
+                stats['new_articles'] += 1
+            
+            # Check if in session cooldown
+            cycles_since = self.display_cycle_count - article['last_displayed_cycle']
+            if article['display_count'] > 0 and cycles_since < MIN_COOLDOWN_CYCLES:
+                stats['articles_in_cooldown'] += 1
+            
+            # Check if globally recent
+            if self.article_memory.was_recently_shown(url):
+                stats['globally_recent_articles'] += 1
+            
+            # Check if available (would get score > 0)
+            score = self._calculate_priority_score(article, adaptive_mode=False)
+            if score > 0:
+                stats['available_articles'] += 1
+        
+        return stats 
