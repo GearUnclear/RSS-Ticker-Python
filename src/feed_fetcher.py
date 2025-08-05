@@ -393,20 +393,20 @@ class FeedFetcher:
             else:  # Older but unseen
                 return NEW_ARTICLE_PRIORITY * 0.7
         
-        # Previously shown articles have lower priority based on cooldown
+        # Previously shown articles have zero priority during cooldown
         cycles_since_display = self.display_cycle_count - article['last_displayed_cycle']
         if cycles_since_display < MIN_COOLDOWN_CYCLES:
-            return 10  # Very low priority during cooldown
+            return 0  # Zero priority during cooldown - prevents selection
         
         # Gradual priority recovery after cooldown
         cooldown_bonus = min(cycles_since_display - MIN_COOLDOWN_CYCLES, 10) * 3
-        base_priority = 20 + cooldown_bonus
+        base_priority = 30 + cooldown_bonus  # Higher base to compete with new articles
         
         # Age penalty for older articles
         hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
-        age_penalty = min(hours_since_fetch / PRIORITY_DECAY_HOURS, 1) * 20
+        age_penalty = min(hours_since_fetch / PRIORITY_DECAY_HOURS, 1) * 15
         
-        return max(base_priority - age_penalty, 5)  # Minimum priority of 5
+        return max(base_priority - age_penalty, 10)  # Minimum priority of 10
     
     def _update_article_pool(self, new_articles: List[Tuple[str, str, str]]):
         """
@@ -454,11 +454,18 @@ class FeedFetcher:
         if not self.article_pool:
             return []
         
-        # Calculate priority scores for all articles
+        # Calculate priority scores for all articles and filter out zero-priority
         scored_articles = []
         for article in self.article_pool:
             score = self._calculate_priority_score(article)
-            scored_articles.append((article, score))
+            if score > 0:  # Only include articles with positive priority
+                scored_articles.append((article, score))
+        
+        logger.debug(f"Available articles for selection: {len(scored_articles)}/{len(self.article_pool)}")
+        
+        if not scored_articles:
+            logger.warning("No articles available for selection (all in cooldown)")
+            return []
         
         # Sort by priority score (highest first)
         scored_articles.sort(key=lambda x: x[1], reverse=True)
@@ -469,7 +476,7 @@ class FeedFetcher:
         
         selected_articles = []
         
-        # Fill high priority slots with top-scored articles
+        # Fill high priority slots with top-scored articles (priority >= 60)
         high_priority_candidates = [item for item in scored_articles if item[1] >= 60]
         if high_priority_candidates:
             # Randomize among high priority to avoid same order
@@ -479,17 +486,21 @@ class FeedFetcher:
         
         # Fill remaining slots with variety (weighted random selection)
         remaining_candidates = [item for item in scored_articles 
-                              if item[0] not in selected_articles]
+                              if item[0] not in selected_articles and item[1] > 0]
         
         if remaining_candidates and variety_slots > 0:
-            # Weighted random selection based on scores
-            weights = [max(score, 1) for _, score in remaining_candidates]
-            variety_articles = random.choices(
-                [article for article, _ in remaining_candidates],
-                weights=weights,
-                k=min(variety_slots, len(remaining_candidates))
-            )
-            selected_articles.extend(variety_articles)
+            # Fill up to available slots or articles, whichever is smaller
+            slots_to_fill = min(variety_slots, len(remaining_candidates))
+            
+            if slots_to_fill > 0:
+                # Weighted random selection based on scores
+                weights = [max(score, 1) for _, score in remaining_candidates]
+                variety_articles = random.choices(
+                    [article for article, _ in remaining_candidates],
+                    weights=weights,
+                    k=slots_to_fill
+                )
+                selected_articles.extend(variety_articles)
         
         # Update display metadata for selected articles
         self.display_cycle_count += 1
@@ -502,6 +513,6 @@ class FeedFetcher:
                  for article in selected_articles]
         
         logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count})")
-        logger.debug(f"High priority slots: {high_priority_slots}, Variety slots: {variety_slots}")
+        logger.debug(f"Available for selection: {len(scored_articles)}, High priority: {len([x for x in scored_articles if x[1] >= 60])}")
         
         return result 

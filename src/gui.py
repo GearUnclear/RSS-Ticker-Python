@@ -51,8 +51,8 @@ class TickerGUI:
         
         # Dynamic height based on description setting
         self.base_height = TICKER_HEIGHT_PX
-        self.min_description_height = 20  # Minimum additional height
-        self.max_description_height = 120  # Maximum additional height
+        self.min_description_height = 30  # Minimum additional height (increased)
+        self.max_description_height = 200  # Maximum additional height (increased for long descriptions)
         self.description_height = self.min_description_height
         self.current_height = self.base_height
         
@@ -477,15 +477,20 @@ class TickerGUI:
             # Create font for measuring
             desc_font = tkfont.Font(family=FONT_FAMILY, size=FONT_SIZE-2)
             
-            # Available width for text (with margins)
-            available_width = self.screen_width - 40
+            # Available width for text (with generous margins)
+            available_width = self.screen_width - 60  # More margin for better readability
             
             # Measure the text to determine how many lines are needed
             lines_needed = self.calculate_text_lines(max_description, desc_font, available_width)
             
-            # Calculate height needed (line height + padding)
+            # Calculate height needed with better spacing
             line_height = desc_font.metrics('linespace')
-            needed_height = (lines_needed * line_height) + 10  # +10 for padding
+            line_spacing = max(2, line_height // 8)  # Add small spacing between lines
+            content_height = (lines_needed * line_height) + ((lines_needed - 1) * line_spacing)
+            
+            # Add generous padding (top + bottom)
+            padding = 20
+            needed_height = content_height + padding
             
             # Clamp to min/max bounds
             self.description_height = max(
@@ -493,7 +498,7 @@ class TickerGUI:
                 min(needed_height, self.max_description_height)
             )
             
-            logger.debug(f"Calculated description height: {self.description_height}px for {lines_needed} lines")
+            logger.debug(f"Calculated description height: {self.description_height}px for {lines_needed} lines (line_height={line_height}, content={content_height}, padding={padding})")
             
         except Exception as e:
             logger.warning(f"Error calculating description height: {e}")
@@ -504,24 +509,38 @@ class TickerGUI:
         if not text:
             return 1
             
-        # Split into words
-        words = text.split()
-        if not words:
-            return 1
-            
-        lines = 1
-        current_line_width = 0
+        # Handle explicit line breaks
+        paragraphs = text.split('\n')
+        total_lines = 0
         
-        for word in words:
-            word_width = font.measure(word + " ")
-            
-            if current_line_width + word_width > width:
-                lines += 1
-                current_line_width = word_width
-            else:
-                current_line_width += word_width
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                total_lines += 1  # Empty line
+                continue
                 
-        return lines
+            # Split into words
+            words = paragraph.split()
+            if not words:
+                total_lines += 1
+                continue
+                
+            lines_for_paragraph = 1
+            current_line_width = 0
+            
+            for word in words:
+                # Measure word with a space (except for last word)
+                word_width = font.measure(word + " ")
+                
+                # Check if adding this word would exceed the width
+                if current_line_width > 0 and (current_line_width + word_width) > width:
+                    lines_for_paragraph += 1
+                    current_line_width = word_width
+                else:
+                    current_line_width += word_width
+            
+            total_lines += lines_for_paragraph
+                
+        return max(total_lines, 1)
             
     def find_current_headline(self):
         """Find the headline currently at the reference point (40% from left)."""
@@ -584,7 +603,7 @@ class TickerGUI:
                 font=desc_font,
                 fill="#CCCCCC",  # Lighter color for visibility
                 anchor="center",
-                width=self.screen_width - 40,  # Leave small margins
+                width=self.screen_width - 60,  # Match calculation width (60px margins)
                 tags="description"
             )
         except tk.TclError:
