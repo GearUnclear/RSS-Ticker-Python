@@ -88,9 +88,36 @@ def format_entry(entry: dict) -> Tuple[str, str, str]:
         when = ""
         if "published" in entry:
             try:
-                dt_local = parsedate_to_datetime(entry.published).astimezone(
-                    zoneinfo.ZoneInfo(LOCAL_TZ)
-                )
+                dt_utc = parsedate_to_datetime(entry.published)
+                
+                # Try to use the configured timezone
+                try:
+                    if LOCAL_TZ is None:
+                        # Use system local timezone
+                        dt_local = dt_utc.astimezone()
+                    else:
+                        dt_local = dt_utc.astimezone(zoneinfo.ZoneInfo(LOCAL_TZ))
+                except (zoneinfo.ZoneInfoNotFoundError, KeyError):
+                    # Fallback to common timezone names
+                    fallback_zones = [
+                        "America/Los_Angeles",
+                        "US/Pacific", 
+                        "PST8PDT"
+                    ]
+                    dt_local = None
+                    for zone in fallback_zones:
+                        try:
+                            dt_local = dt_utc.astimezone(zoneinfo.ZoneInfo(zone))
+                            logger.warning(f"Using fallback timezone {zone} instead of {LOCAL_TZ}")
+                            break
+                        except zoneinfo.ZoneInfoNotFoundError:
+                            continue
+                    
+                    # Ultimate fallback to system local time
+                    if dt_local is None:
+                        dt_local = dt_utc.astimezone()
+                        logger.warning(f"Using system local timezone as fallback")
+                
                 when = dt_local.strftime(TIME_FMT).strip()
             except Exception as e:
                 logger.debug(f"Failed to parse date: {e}")

@@ -7,14 +7,18 @@ import urllib.request
 import urllib.error
 import ssl
 import queue
-from typing import List, Tuple, Optional
+import random
+from datetime import datetime, timedelta
+from typing import List, Tuple, Optional, Dict
 
 import feedparser
 
 try:
     from .config import (
         FEED_URLS, REFRESH_MINUTES, MAX_HEADLINES, FETCH_TIMEOUT,
-        ERROR_BACKOFF_BASE, ERROR_BACKOFF_MAX, MAX_CONSECUTIVE_ERRORS, BULLET
+        ERROR_BACKOFF_BASE, ERROR_BACKOFF_MAX, MAX_CONSECUTIVE_ERRORS, BULLET,
+        ARTICLE_POOL_SIZE, DISPLAY_SUBSET_SIZE, BREAKING_NEWS_BIAS,
+        NEW_ARTICLE_PRIORITY, PRIORITY_DECAY_HOURS, MIN_COOLDOWN_CYCLES
     )
     from .exceptions import FeedFetchError, FeedParseError
     from .logger import logger
@@ -23,7 +27,9 @@ except ImportError:
     # Fallback for direct execution
     from config import (
         FEED_URLS, REFRESH_MINUTES, MAX_HEADLINES, FETCH_TIMEOUT,
-        ERROR_BACKOFF_BASE, ERROR_BACKOFF_MAX, MAX_CONSECUTIVE_ERRORS, BULLET
+        ERROR_BACKOFF_BASE, ERROR_BACKOFF_MAX, MAX_CONSECUTIVE_ERRORS, BULLET,
+        ARTICLE_POOL_SIZE, DISPLAY_SUBSET_SIZE, BREAKING_NEWS_BIAS,
+        NEW_ARTICLE_PRIORITY, PRIORITY_DECAY_HOURS, MIN_COOLDOWN_CYCLES
     )
     from exceptions import FeedFetchError, FeedParseError
     from logger import logger
@@ -39,6 +45,10 @@ class FeedFetcher:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._ssl_verify_failed = False
+        
+        # Article pool with priority tracking
+        self.article_pool: List[Dict] = []
+        self.display_cycle_count = 0
         
     def start(self):
         """Start the feed fetching thread."""
@@ -283,13 +293,28 @@ class FeedFetcher:
         while not self._stop_event.is_set():
             try:
                 # Fetch and parse all feeds
-                items = self._fetch_all_feeds()
+                new_items = self._fetch_all_feeds()
                 
-                if items:
-                    self.update_queue.put(('update', items))
-                    logger.info(f"Sent {len(items)} items to GUI")
+                if new_items:
+                    # Update article pool with new items
+                    self._update_article_pool(new_items)
+                    
+                    # Select articles for display with breaking news bias
+                    display_items = self._select_articles_for_display()
+                    
+                    if display_items:
+                        self.update_queue.put(('update', display_items))
+                        logger.info(f"Sent {len(display_items)} selected items to GUI")
+                    else:
+                        self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "")]))
                 else:
-                    self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "")]))
+                    # If no new items, still try to display from existing pool
+                    display_items = self._select_articles_for_display()
+                    if display_items:
+                        self.update_queue.put(('update', display_items))
+                        logger.info(f"Sent {len(display_items)} items from pool to GUI")
+                    else:
+                        self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "")]))
                     
                 # Reset error counter on success
                 self.consecutive_errors = 0
@@ -344,4 +369,139 @@ class FeedFetcher:
             sleep_sec = REFRESH_MINUTES * 60
             logger.debug(f"Sleeping {sleep_sec}s until next refresh")
             
-        return sleep_sec 
+        return sleep_sec
+    
+    def _calculate_priority_score(self, article: Dict) -> float:
+        """
+        Calculate priority score for an article based on age and display history.
+        
+        Args:
+            article: Article dictionary with metadata
+            
+        Returns:
+            Priority score (higher = more likely to be shown)
+        """
+        now = datetime.now()
+        
+        # New article gets maximum priority
+        if article['display_count'] == 0:
+            hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
+            if hours_since_fetch < 0.5:  # Very fresh (< 30 minutes)
+                return NEW_ARTICLE_PRIORITY
+            elif hours_since_fetch < 2:  # Recent (< 2 hours)
+                return NEW_ARTICLE_PRIORITY * 0.9
+            else:  # Older but unseen
+                return NEW_ARTICLE_PRIORITY * 0.7
+        
+        # Previously shown articles have lower priority based on cooldown
+        cycles_since_display = self.display_cycle_count - article['last_displayed_cycle']
+        if cycles_since_display < MIN_COOLDOWN_CYCLES:
+            return 10  # Very low priority during cooldown
+        
+        # Gradual priority recovery after cooldown
+        cooldown_bonus = min(cycles_since_display - MIN_COOLDOWN_CYCLES, 10) * 3
+        base_priority = 20 + cooldown_bonus
+        
+        # Age penalty for older articles
+        hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
+        age_penalty = min(hours_since_fetch / PRIORITY_DECAY_HOURS, 1) * 20
+        
+        return max(base_priority - age_penalty, 5)  # Minimum priority of 5
+    
+    def _update_article_pool(self, new_articles: List[Tuple[str, str, str]]):
+        """
+        Update the article pool with new articles, maintaining priority metadata.
+        
+        Args:
+            new_articles: List of (display_text, url, description) tuples
+        """
+        now = datetime.now()
+        
+        # Track existing articles by URL to avoid duplicates
+        existing_urls = {article['url'] for article in self.article_pool}
+        
+        # Add new articles to pool
+        for display_text, url, description in new_articles:
+            if url not in existing_urls:
+                article = {
+                    'display_text': display_text,
+                    'url': url,
+                    'description': description,
+                    'first_seen': now,
+                    'display_count': 0,
+                    'last_displayed_cycle': 0
+                }
+                self.article_pool.append(article)
+                logger.debug(f"Added new article to pool: {display_text[:50]}...")
+        
+        # Remove oldest articles if pool is too large
+        if len(self.article_pool) > ARTICLE_POOL_SIZE:
+            # Sort by priority (lowest first) and remove the lowest priority articles
+            self.article_pool.sort(key=self._calculate_priority_score)
+            removed_count = len(self.article_pool) - ARTICLE_POOL_SIZE
+            self.article_pool = self.article_pool[removed_count:]
+            logger.debug(f"Removed {removed_count} low-priority articles from pool")
+        
+        logger.info(f"Article pool updated: {len(self.article_pool)} articles total")
+    
+    def _select_articles_for_display(self) -> List[Tuple[str, str, str]]:
+        """
+        Select articles for display using breaking news bias and priority scoring.
+        
+        Returns:
+            List of (display_text, url, description) tuples selected for display
+        """
+        if not self.article_pool:
+            return []
+        
+        # Calculate priority scores for all articles
+        scored_articles = []
+        for article in self.article_pool:
+            score = self._calculate_priority_score(article)
+            scored_articles.append((article, score))
+        
+        # Sort by priority score (highest first)
+        scored_articles.sort(key=lambda x: x[1], reverse=True)
+        
+        # Apply breaking news bias
+        high_priority_slots = int(DISPLAY_SUBSET_SIZE * BREAKING_NEWS_BIAS)
+        variety_slots = DISPLAY_SUBSET_SIZE - high_priority_slots
+        
+        selected_articles = []
+        
+        # Fill high priority slots with top-scored articles
+        high_priority_candidates = [item for item in scored_articles if item[1] >= 60]
+        if high_priority_candidates:
+            # Randomize among high priority to avoid same order
+            random.shuffle(high_priority_candidates)
+            for article, score in high_priority_candidates[:high_priority_slots]:
+                selected_articles.append(article)
+        
+        # Fill remaining slots with variety (weighted random selection)
+        remaining_candidates = [item for item in scored_articles 
+                              if item[0] not in selected_articles]
+        
+        if remaining_candidates and variety_slots > 0:
+            # Weighted random selection based on scores
+            weights = [max(score, 1) for _, score in remaining_candidates]
+            variety_articles = random.choices(
+                [article for article, _ in remaining_candidates],
+                weights=weights,
+                k=min(variety_slots, len(remaining_candidates))
+            )
+            selected_articles.extend(variety_articles)
+        
+        # Update display metadata for selected articles
+        self.display_cycle_count += 1
+        for article in selected_articles:
+            article['display_count'] += 1
+            article['last_displayed_cycle'] = self.display_cycle_count
+        
+        # Convert back to tuple format
+        result = [(article['display_text'], article['url'], article['description']) 
+                 for article in selected_articles]
+        
+        logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count})")
+        logger.debug(f"High priority slots: {high_priority_slots}, Variety slots: {variety_slots}")
+        
+        return result 

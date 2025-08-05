@@ -100,6 +100,14 @@ REFRESH_MINUTES = 5        # How often to check for new articles
 MAX_HEADLINES = 30          # Maximum headlines per feed (total will be higher with multiple feeds)
 FETCH_TIMEOUT = 30          # Timeout for each feed request in seconds
 
+# Breaking News Priority Settings
+ARTICLE_POOL_SIZE = 75              # Size of article pool to maintain
+DISPLAY_SUBSET_SIZE = 15            # Articles to show per display cycle
+BREAKING_NEWS_BIAS = 0.8            # Fraction of slots reserved for high priority articles
+NEW_ARTICLE_PRIORITY = 100          # Priority score for newly fetched articles
+PRIORITY_DECAY_HOURS = 2            # Hours for priority to naturally decay
+MIN_COOLDOWN_CYCLES = 5             # Minimum cycles before reshowing an article
+
 # ============================================================================
 # DISPLAY SETTINGS  
 # ============================================================================
@@ -119,6 +127,10 @@ FONT_SIZE_PAUSE = 12
 FONT_SIZE_CLOSE = 14
 
 # Time Settings
+# Note: On Windows, if you get timezone errors, try these alternatives:
+# LOCAL_TZ = "US/Pacific"           # Alternative format
+# LOCAL_TZ = "PST8PDT"             # POSIX format  
+# LOCAL_TZ = None                   # Use system local time
 LOCAL_TZ = "America/Los_Angeles"
 TIME_FMT = "%I:%M%p"         # Windows compatible
 
