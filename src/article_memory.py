@@ -133,3 +133,17 @@ class ArticleMemory:
                 logger.info("Cleared article memory")
             except OSError as e:
                 logger.error(f"Failed to delete memory file: {e}")
+    
+    def reset_if_stale(self, hours_threshold: int = 72):
+        """Reset memory if all articles are older than threshold."""
+        if not self.memory:
+            return False
+            
+        newest_time = max(self.memory.values())
+        hours_since = (datetime.now() - newest_time).total_seconds() / 3600
+        
+        if hours_since > hours_threshold:
+            logger.warning(f"All articles older than {hours_threshold}h, resetting memory")
+            self.clear_memory()
+            return True
+        return False

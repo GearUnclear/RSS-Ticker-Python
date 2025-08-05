@@ -590,7 +590,18 @@ class FeedFetcher:
         
         if not scored_articles:
             logger.error("No articles available even in emergency mode - all articles exhausted")
-            return []
+            # Last resort: reset display counts to allow immediate re-display
+            if len(self.article_pool) > 0:
+                logger.warning("CRITICAL: Resetting article display counts to prevent empty ticker")
+                oldest_articles = sorted(self.article_pool, 
+                                        key=lambda x: x['last_displayed_cycle'])[:DISPLAY_SUBSET_SIZE]
+                for article in oldest_articles:
+                    article['last_displayed_cycle'] = 0  # Reset to allow immediate display
+                    scored_articles.append((article, 50))  # Give medium priority
+                logger.info(f"Reset {len(scored_articles)} oldest articles for emergency display")
+            
+            if not scored_articles:
+                return []  # Truly no articles available
         
         # Sort by priority score (highest first)
         scored_articles.sort(key=lambda x: x[1], reverse=True)
