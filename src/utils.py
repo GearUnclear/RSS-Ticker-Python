@@ -70,7 +70,7 @@ def validate_url(url: str) -> bool:
         raise InvalidURLError(f"URL validation failed: {str(e)}")
 
 
-def format_entry(entry: dict) -> Tuple[str, str]:
+def format_entry(entry: dict) -> Tuple[str, str, str]:
     """
     Format an RSS entry for display.
     
@@ -78,11 +78,12 @@ def format_entry(entry: dict) -> Tuple[str, str]:
         entry: RSS entry dict from feedparser
         
     Returns:
-        Tuple of (display_text, url)
+        Tuple of (display_text, url, description)
     """
     try:
         title = entry.get('title', 'No title').strip()
         author = entry.get("dc_creator") or entry.get("author") or "NYT Staff"
+        description = entry.get('description', entry.get('summary', '')).strip()
         
         when = ""
         if "published" in entry:
@@ -101,11 +102,11 @@ def format_entry(entry: dict) -> Tuple[str, str]:
         text = " ".join(parts) + BULLET
         url = entry.get('link', '')
         
-        return text, url
+        return text, url, description
         
     except Exception as e:
         logger.error(f"Error formatting entry: {e}")
-        return f"(Error formatting entry){BULLET}", ""
+        return f"(Error formatting entry){BULLET}", "", ""
 
 
 def calculate_text_width(text: str, font_size: int) -> int:

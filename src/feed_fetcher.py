@@ -132,7 +132,7 @@ class FeedFetcher:
         except Exception as e:
             raise FeedFetchError(f"Unexpected error fetching feed: {str(e)}")
             
-    def _parse_feed(self, feed_data: bytes) -> List[Tuple[str, str]]:
+    def _parse_feed(self, feed_data: bytes) -> List[Tuple[str, str, str]]:
         """
         Parse RSS feed data into formatted entries.
         
@@ -140,7 +140,7 @@ class FeedFetcher:
             feed_data: Raw feed data
             
         Returns:
-            List of (display_text, url) tuples
+            List of (display_text, url, description) tuples
             
         Raises:
             FeedParseError: If parsing fails
@@ -179,13 +179,13 @@ class FeedFetcher:
         except Exception as e:
             raise FeedParseError(f"Failed to parse feed: {str(e)}")
             
-    def _fetch_all_feeds(self) -> List[Tuple[str, str]]:
+    def _fetch_all_feeds(self) -> List[Tuple[str, str, str]]:
         """
         Fetch and process all configured feeds, removing duplicates across feeds
         and intermixing the results.
         
         Returns:
-            List of (display_text, url) tuples from all feeds combined
+            List of (display_text, url, description) tuples from all feeds combined
         """
         all_entries = []
         feed_entries = {}  # Store entries by feed URL for debugging
@@ -213,15 +213,15 @@ class FeedFetcher:
         # Remove duplicates across feeds and intermix
         return self._deduplicate_and_intermix(all_entries)
     
-    def _deduplicate_and_intermix(self, all_entries: List[Tuple[Tuple[str, str], str]]) -> List[Tuple[str, str]]:
+    def _deduplicate_and_intermix(self, all_entries: List[Tuple[Tuple[str, str, str], str]]) -> List[Tuple[str, str, str]]:
         """
         Remove duplicate entries across feeds and intermix the remaining entries.
         
         Args:
-            all_entries: List of ((display_text, url), feed_url) tuples
+            all_entries: List of ((display_text, url, description), feed_url) tuples
             
         Returns:
-            List of (display_text, url) tuples with duplicates removed and entries intermixed
+            List of (display_text, url, description) tuples with duplicates removed and entries intermixed
         """
         # Group entries by feed
         feed_groups = {}
@@ -243,11 +243,11 @@ class FeedFetcher:
         
         for feed_url, entries in feed_groups.items():
             unique_entries_by_feed[feed_url] = []
-            for display_text, url in entries:
+            for display_text, url, description in entries:
                 title = extract_title(display_text)
                 if title not in seen_titles:
                     seen_titles.add(title)
-                    unique_entries_by_feed[feed_url].append((display_text, url))
+                    unique_entries_by_feed[feed_url].append((display_text, url, description))
                 else:
                     logger.debug(f"Removing duplicate: {title}")
         
@@ -289,7 +289,7 @@ class FeedFetcher:
                     self.update_queue.put(('update', items))
                     logger.info(f"Sent {len(items)} items to GUI")
                 else:
-                    self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "")]))
+                    self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "")]))
                     
                 # Reset error counter on success
                 self.consecutive_errors = 0
