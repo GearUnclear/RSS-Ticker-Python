@@ -16,7 +16,7 @@ try:
         TICKER_HEIGHT_PX, BG_COLOR, FG_COLOR, FONT_FAMILY, FONT_SIZE,
         SCROLL_DELAY_MS, PIXELS_PER_STEP, MIN_HEADLINE_GAP, BULLET,
         PAUSE_ICON, CLOSE_ICON, FONT_SIZE_PAUSE, FONT_SIZE_CLOSE,
-        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL
+        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS
     )
     from .exceptions import InvalidURLError
     from .logger import logger
@@ -27,7 +27,7 @@ except ImportError:
         TICKER_HEIGHT_PX, BG_COLOR, FG_COLOR, FONT_FAMILY, FONT_SIZE,
         SCROLL_DELAY_MS, PIXELS_PER_STEP, MIN_HEADLINE_GAP, BULLET,
         PAUSE_ICON, CLOSE_ICON, FONT_SIZE_PAUSE, FONT_SIZE_CLOSE,
-        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL
+        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS
     )
     from exceptions import InvalidURLError
     from logger import logger
@@ -40,7 +40,7 @@ class TickerGUI:
     def __init__(self, update_queue: queue.Queue):
         self.update_queue = update_queue
         today_str = date.today().strftime("%B %d, %Y")
-        self.headlines = deque([(f"🗞️ BREAKING: Loading Today's Premium NYT Coverage for {today_str} • Stay Informed with Real-Time News Updates {BULLET}", "", f"Loading the latest news stories from The New York Times for {today_str}. Please wait while we fetch your personalized news feed with the most current and relevant stories.")])
+        self.headlines = deque([(f"🗞️ BREAKING: Loading Today's Premium NYT Coverage for {today_str} • Stay Informed with Real-Time News Updates {BULLET}", "", f"Loading the latest news stories from The New York Times for {today_str}. Please wait while we fetch your personalized news feed with the most current and relevant stories.", "Default")])
         self.current_index = 0
         self.paused = False
         self.show_descriptions = False  
@@ -204,7 +204,7 @@ class TickerGUI:
         if self._running:
             self.root.after(500, self.check_updates)
             
-    def _handle_update(self, items: List[Tuple[str, str, str]]):
+    def _handle_update(self, items: List[Tuple[str, str, str, str]]):
         """Handle headline updates."""
         logger.info(f"Received {len(items)} headlines from fetch thread")
         self.headlines.clear()
@@ -229,14 +229,14 @@ class TickerGUI:
         """Handle error messages."""
         logger.info(f"Displaying error: {error_msg}")
         self.headlines.clear()
-        self.headlines.append((f"[Error: {error_msg}]{BULLET}", "", f"Error: {error_msg}"))
+        self.headlines.append((f"[Error: {error_msg}]{BULLET}", "", f"Error: {error_msg}", "Default"))
         self.calculate_optimal_description_height()
         
     def _handle_critical_error(self, error_msg: str):
         """Handle critical error messages."""
         logger.critical(f"Critical error: {error_msg}")
         self.headlines.clear()
-        self.headlines.append((f"[CRITICAL: {error_msg}]{BULLET}", "", f"Critical Error: {error_msg}"))
+        self.headlines.append((f"[CRITICAL: {error_msg}]{BULLET}", "", f"Critical Error: {error_msg}", "Default"))
         self.calculate_optimal_description_height()
         
     def should_load_next(self) -> bool:
@@ -275,17 +275,46 @@ class TickerGUI:
         try:
             # Get next item
             idx = self.current_index % len(self.headlines)
-            text, url, description = self.headlines[idx]
+            
+            # Handle both old 3-tuple and new 4-tuple format
+            if len(self.headlines[idx]) == 4:
+                text, url, description, category = self.headlines[idx]
+            else:
+                text, url, description = self.headlines[idx]
+                category = 'Default'
+            
             self.current_index = idx + 1
             
-            logger.debug(f"Loading item {idx}: {text[:50]}...")
+            # Get color for this category
+            text_color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
             
-            # Create new text item
+            # Add subtle category prefix for clarity
+            category_prefix = {
+                'Politics': '[POL]',
+                'Technology': '[TECH]',
+                'Business': '[BIZ]',
+                'World': '[WORLD]',
+                'Science': '[SCI]',
+                'Sports': '[SPORT]',
+                'Arts': '[ARTS]',
+                'Health': '[HEALTH]',
+                'Opinion': '[OP]',
+                'HomePage': '[TOP]'
+            }.get(category, '')
+            
+            if category_prefix:
+                display_text = f"{category_prefix} {text}"
+            else:
+                display_text = text
+            
+            logger.debug(f"Loading item {idx}: {text[:50]}... (category: {category}, color: {text_color})")
+            
+            # Create new text item with category color
             text_id = self.canvas.create_text(
                 float(self.screen_width), self.text_y,
-                text=text,
+                text=display_text,
                 font=self.font,
-                fill=FG_COLOR,
+                fill=text_color,
                 anchor="w"
             )
             
@@ -293,8 +322,9 @@ class TickerGUI:
             self.text_items.append({
                 'id': text_id,
                 'url': url,
-                'text': text,
+                'text': display_text,
                 'description': description,
+                'category': category,
                 'x': float(self.screen_width),
                 'load_time': time.time()
             })

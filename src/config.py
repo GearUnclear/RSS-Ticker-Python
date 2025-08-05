@@ -120,6 +120,21 @@ MIN_HEADLINE_GAP = 80         # Minimum gap between headlines in pixels
 BG_COLOR = "#000000"
 FG_COLOR = "#FFA500"
 
+# Category Colors (warm orange-based palette)
+CATEGORY_COLORS = {
+    'Politics': '#FFA500',      # Original orange (flagship)
+    'Technology': '#FFD700',    # Gold (complementary warm)
+    'Business': '#FF8C00',      # Dark orange (deeper variant)
+    'World': '#FFC850',         # Light amber (softer orange)
+    'Science': '#FFAB3D',       # Tangerine (mid-tone)
+    'Sports': '#FFB84D',        # Butterscotch (warm neutral)
+    'Arts': '#FFA07A',          # Light salmon (subtle variation)
+    'Health': '#FFE4B5',        # Moccasin (pale warm)
+    'Opinion': '#F0E68C',       # Khaki (muted warm)
+    'HomePage': '#FFA500',      # Default to original orange
+    'Default': '#FFA500'        # Fallback color
+}
+
 # Font Settings
 FONT_FAMILY = "Courier New"   # More reliable on Windows
 FONT_SIZE = 14

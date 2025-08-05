@@ -8,8 +8,11 @@ import urllib.error
 import ssl
 import queue
 import random
+import asyncio
+import concurrent.futures
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional, Dict
+import re
 
 import feedparser
 
@@ -18,7 +21,8 @@ try:
         FEED_URLS, REFRESH_MINUTES, MAX_HEADLINES, FETCH_TIMEOUT,
         ERROR_BACKOFF_BASE, ERROR_BACKOFF_MAX, MAX_CONSECUTIVE_ERRORS, BULLET,
         ARTICLE_POOL_SIZE, DISPLAY_SUBSET_SIZE, BREAKING_NEWS_BIAS,
-        NEW_ARTICLE_PRIORITY, PRIORITY_DECAY_HOURS, MIN_COOLDOWN_CYCLES
+        NEW_ARTICLE_PRIORITY, PRIORITY_DECAY_HOURS, MIN_COOLDOWN_CYCLES,
+        CATEGORY_COLORS
     )
     from .exceptions import FeedFetchError, FeedParseError
     from .logger import logger
@@ -30,7 +34,8 @@ except ImportError:
         FEED_URLS, REFRESH_MINUTES, MAX_HEADLINES, FETCH_TIMEOUT,
         ERROR_BACKOFF_BASE, ERROR_BACKOFF_MAX, MAX_CONSECUTIVE_ERRORS, BULLET,
         ARTICLE_POOL_SIZE, DISPLAY_SUBSET_SIZE, BREAKING_NEWS_BIAS,
-        NEW_ARTICLE_PRIORITY, PRIORITY_DECAY_HOURS, MIN_COOLDOWN_CYCLES
+        NEW_ARTICLE_PRIORITY, PRIORITY_DECAY_HOURS, MIN_COOLDOWN_CYCLES,
+        CATEGORY_COLORS
     )
     from exceptions import FeedFetchError, FeedParseError
     from logger import logger
@@ -195,32 +200,103 @@ class FeedFetcher:
         except Exception as e:
             raise FeedParseError(f"Failed to parse feed: {str(e)}")
             
-    def _fetch_all_feeds(self) -> List[Tuple[str, str, str]]:
+    def _extract_category_from_url(self, feed_url: str) -> str:
         """
-        Fetch and process all configured feeds, removing duplicates across feeds
-        and intermixing the results.
+        Extract category from feed URL.
+        
+        Args:
+            feed_url: RSS feed URL
+            
+        Returns:
+            Category name
+        """
+        # Extract category from URL pattern
+        match = re.search(r'/rss/nyt/([^/.]+)\.xml', feed_url)
+        if match:
+            category = match.group(1)
+            # Map URL segments to display categories
+            category_map = {
+                'Politics': 'Politics',
+                'HomePage': 'HomePage',
+                'Technology': 'Technology',
+                'PersonalTech': 'Technology',
+                'Business': 'Business',
+                'World': 'World',
+                'Science': 'Science',
+                'Sports': 'Sports',
+                'Arts': 'Arts',
+                'Health': 'Health',
+                'Opinion': 'Opinion',
+                'US': 'World',
+                'NYRegion': 'World',
+                'Style': 'Arts',
+                'Travel': 'Arts',
+                'Movies': 'Arts',
+                'Books': 'Arts',
+                'Theater': 'Arts',
+                'Music': 'Arts'
+            }
+            return category_map.get(category, 'Default')
+        return 'Default'
+    
+    def _fetch_single_feed(self, feed_url: str) -> Tuple[str, List[Tuple[str, str, str, str]]]:
+        """
+        Fetch and parse a single feed.
+        
+        Args:
+            feed_url: URL of the feed to fetch
+            
+        Returns:
+            Tuple of (feed_url, list of (display_text, url, description, category) tuples)
+        """
+        try:
+            logger.info(f"Fetching feed: {feed_url}")
+            feed_data = self._fetch_feed(feed_url)
+            entries = self._parse_feed(feed_data)
+            
+            # Add category to each entry
+            category = self._extract_category_from_url(feed_url)
+            categorized_entries = [(text, url, desc, category) for text, url, desc in entries]
+            
+            logger.info(f"Fetched {len(entries)} entries from {feed_url} (category: {category})")
+            return (feed_url, categorized_entries)
+        except (FeedFetchError, FeedParseError) as e:
+            logger.warning(f"Failed to fetch {feed_url}: {e}")
+            return (feed_url, [])
+        except Exception as e:
+            logger.error(f"Unexpected error fetching {feed_url}: {e}")
+            return (feed_url, [])
+    
+    def _fetch_all_feeds(self) -> List[Tuple[str, str, str, str]]:
+        """
+        Fetch and process all configured feeds concurrently, removing duplicates
+        across feeds and intermixing the results.
         
         Returns:
-            List of (display_text, url, description) tuples from all feeds combined
+            List of (display_text, url, description, category) tuples from all feeds combined
         """
         all_entries = []
         feed_entries = {}  # Store entries by feed URL for debugging
         
-        # Fetch each feed
-        for feed_url in FEED_URLS:
-            try:
-                logger.info(f"Fetching feed: {feed_url}")
-                feed_data = self._fetch_feed(feed_url)
-                entries = self._parse_feed(feed_data)
-                feed_entries[feed_url] = entries
-                all_entries.extend([(entry, feed_url) for entry in entries])
-                logger.info(f"Fetched {len(entries)} entries from {feed_url}")
-            except (FeedFetchError, FeedParseError) as e:
-                logger.warning(f"Failed to fetch {feed_url}: {e}")
-                continue
-            except Exception as e:
-                logger.error(f"Unexpected error fetching {feed_url}: {e}")
-                continue
+        # Fetch all feeds concurrently
+        start_time = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(FEED_URLS))) as executor:
+            # Submit all feed fetches
+            future_to_url = {executor.submit(self._fetch_single_feed, url): url for url in FEED_URLS}
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_url):
+                feed_url = future_to_url[future]
+                try:
+                    feed_url, entries = future.result(timeout=FETCH_TIMEOUT)
+                    if entries:
+                        feed_entries[feed_url] = entries
+                        all_entries.extend([(entry, feed_url) for entry in entries])
+                except Exception as e:
+                    logger.error(f"Feed fetch failed for {feed_url}: {e}")
+        
+        fetch_time = time.time() - start_time
+        logger.info(f"Fetched all feeds in {fetch_time:.2f} seconds (concurrent)")
         
         if not all_entries:
             logger.warning("No entries fetched from any feed")
@@ -229,15 +305,15 @@ class FeedFetcher:
         # Remove duplicates across feeds and intermix
         return self._deduplicate_and_intermix(all_entries)
     
-    def _deduplicate_and_intermix(self, all_entries: List[Tuple[Tuple[str, str, str], str]]) -> List[Tuple[str, str, str]]:
+    def _deduplicate_and_intermix(self, all_entries: List[Tuple[Tuple[str, str, str, str], str]]) -> List[Tuple[str, str, str, str]]:
         """
         Remove duplicate entries across feeds and intermix the remaining entries.
         
         Args:
-            all_entries: List of ((display_text, url, description), feed_url) tuples
+            all_entries: List of ((display_text, url, description, category), feed_url) tuples
             
         Returns:
-            List of (display_text, url, description) tuples with duplicates removed and entries intermixed
+            List of (display_text, url, description, category) tuples with duplicates removed and entries intermixed
         """
         # Group entries by feed
         feed_groups = {}
@@ -259,11 +335,11 @@ class FeedFetcher:
         
         for feed_url, entries in feed_groups.items():
             unique_entries_by_feed[feed_url] = []
-            for display_text, url, description in entries:
+            for display_text, url, description, category in entries:
                 title = extract_title(display_text)
                 if title not in seen_titles:
                     seen_titles.add(title)
-                    unique_entries_by_feed[feed_url].append((display_text, url, description))
+                    unique_entries_by_feed[feed_url].append((display_text, url, description, category))
                 else:
                     logger.debug(f"Removing duplicate: {title}")
         
@@ -312,7 +388,7 @@ class FeedFetcher:
                         self.update_queue.put(('update', display_items))
                         logger.info(f"Sent {len(display_items)} selected items to GUI")
                     else:
-                        self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "")]))
+                        self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "", "Default")]))
                 else:
                     # If no new items, still try to display from existing pool
                     display_items = self._select_articles_for_display()
@@ -320,7 +396,7 @@ class FeedFetcher:
                         self.update_queue.put(('update', display_items))
                         logger.info(f"Sent {len(display_items)} items from pool to GUI")
                     else:
-                        self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "")]))
+                        self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "", "Default")]))
                     
                 # Reset error counter on success
                 self.consecutive_errors = 0
@@ -437,12 +513,12 @@ class FeedFetcher:
             
         return final_priority
     
-    def _update_article_pool(self, new_articles: List[Tuple[str, str, str]]):
+    def _update_article_pool(self, new_articles: List[Tuple[str, str, str, str]]):
         """
         Update the article pool with new articles, maintaining priority metadata.
         
         Args:
-            new_articles: List of (display_text, url, description) tuples
+            new_articles: List of (display_text, url, description, category) tuples
         """
         now = datetime.now()
         
@@ -450,18 +526,19 @@ class FeedFetcher:
         existing_urls = {article['url'] for article in self.article_pool}
         
         # Add new articles to pool
-        for display_text, url, description in new_articles:
+        for display_text, url, description, category in new_articles:
             if url not in existing_urls:
                 article = {
                     'display_text': display_text,
                     'url': url,
                     'description': description,
+                    'category': category,
                     'first_seen': now,
                     'display_count': 0,
                     'last_displayed_cycle': 0
                 }
                 self.article_pool.append(article)
-                logger.debug(f"Added new article to pool: {display_text[:50]}...")
+                logger.debug(f"Added new article to pool: {display_text[:50]}... (category: {category})")
         
         # Remove oldest articles if pool is too large
         if len(self.article_pool) > ARTICLE_POOL_SIZE:
@@ -478,13 +555,13 @@ class FeedFetcher:
             pool_stats = self.get_pool_statistics()
             logger.info(f"Pool stats: {pool_stats}")
     
-    def _select_articles_for_display(self) -> List[Tuple[str, str, str]]:
+    def _select_articles_for_display(self) -> List[Tuple[str, str, str, str]]:
         """
         Select articles for display using breaking news bias and priority scoring.
         Implements adaptive cooldown when running low on variety.
         
         Returns:
-            List of (display_text, url, description) tuples selected for display
+            List of (display_text, url, description, category) tuples selected for display
         """
         if not self.article_pool:
             return []
@@ -562,7 +639,7 @@ class FeedFetcher:
                 self.article_memory.mark_article_shown(url)
         
         # Convert back to tuple format
-        result = [(article['display_text'], article['url'], article['description']) 
+        result = [(article['display_text'], article['url'], article['description'], article.get('category', 'Default')) 
                  for article in selected_articles]
         
         logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count}, adaptive={adaptive_mode})")
