@@ -590,7 +590,10 @@ class TickerGUI:
     
     def _get_active_categories(self):
         """Get list of categories that actually have RSS feeds configured."""
-        from .config import FEED_URLS
+        try:
+            from .config import FEED_URLS
+        except ImportError:
+            from config import FEED_URLS
         
         active_categories = set()
         
