@@ -54,10 +54,10 @@ class TickerGUI:
         self._shutdown_callbacks = []
         self.description_text_id = None
         
-        # Direct pool streaming - eliminate batching bottleneck
-        self.article_request_queue = queue.Queue()  # Request articles from fetcher
+        # Smart article management with sliding window tracking
         self.sliding_window_shown = deque(maxlen=50)  # Track last 50 shown articles by URL
         self.last_article_time = {}  # URL -> timestamp of last display
+        self.batch_request_count = 0  # Track batch requests for debugging
         
         # Speed control
         self.speed_multiplier = 1.0  # 1.0 = normal, 2.0 = 2x speed
@@ -247,22 +247,8 @@ class TickerGUI:
         except Exception as e:
             logger.error(f"Error checking updates: {e}")
             
-        # Process article requests from GUI
-        try:
-            while True:
-                try:
-                    request_type, data = self.article_request_queue.get_nowait()
-                    if request_type == 'request_article':
-                        # GUI is asking for next article - could implement direct fetcher communication here
-                        logger.debug(f"GUI requested article with categories: {data['enabled_categories']}")
-                    elif request_type == 'request_refresh':
-                        # GUI needs more articles - trigger refresh
-                        logger.debug(f"GUI requested refresh for {data['needed_count']} articles")
-                except queue.Empty:
-                    break
-        except Exception as e:
-            logger.error(f"Error processing article requests: {e}")
-            
+        # Note: Removed broken article request queue processing that caused spam
+        
         # Schedule next check
         if self._running:
             self.root.after(500, self.check_updates)
@@ -354,21 +340,13 @@ class TickerGUI:
         return right_edge <= (self.screen_width - MIN_HEADLINE_GAP)
         
     def load_next_item(self):
-        """Load the next headline directly from the article pool."""
+        """Load the next headline using intelligent selection."""
         if not self._running:
             return
             
         try:
-            # Request next article directly from fetcher pool
-            self.article_request_queue.put(('request_article', {
-                'enabled_categories': list(self.enabled_categories),
-                'recently_shown': list(self.sliding_window_shown),
-                'last_shown_times': dict(self.last_article_time)
-            }))
-            
-            # Try to get article from headlines buffer (fallback for now)
+            # Use time-decay scoring for article selection
             if self.headlines:
-                # Use time-decay scoring for article selection
                 best_article = self._select_best_available_article()
                 if best_article:
                     text, url, description, category = best_article
@@ -378,12 +356,19 @@ class TickerGUI:
                     self.sliding_window_shown.append(url)
                     self.last_article_time[url] = current_time
                     
+                    # Check if we need more articles after this selection
+                    self._check_article_supply()
+                    
                     # Get color for this category
                     text_color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
                 else:
-                    return  # No suitable article found
+                    # No suitable article found, request fresh batch
+                    self._request_fresh_batch("no suitable articles")
+                    return
             else:
-                return  # No articles available
+                # No articles available, request fresh batch  
+                self._request_fresh_batch("no articles available")
+                return
             
             # Add subtle category prefix for clarity
             category_prefix = {
@@ -1342,10 +1327,50 @@ class TickerGUI:
                 
         return best_article
     
+    def _check_article_supply(self):
+        """Check if we need to request fresh articles."""
+        if not self.headlines:
+            return
+            
+        # Count suitable articles remaining
+        suitable_count = 0
+        current_time = time.time()
+        
+        for item in self.headlines:
+            if len(item) >= 4:
+                text, url, description, category = item
+            else:
+                text, url, description = item
+                category = 'Default'
+                
+            # Skip if category disabled or recently shown
+            if category not in self.enabled_categories:
+                continue
+            if url in self.sliding_window_shown:
+                continue
+                
+            # Check time-based availability
+            last_shown = self.last_article_time.get(url, 0)
+            if current_time - last_shown < 60:  # 1 minute minimum
+                continue
+                
+            suitable_count += 1
+            
+        # Request fresh batch if running low
+        if suitable_count < 10:
+            self._request_fresh_batch(f"low supply: {suitable_count} suitable articles")
+            
+    def _request_fresh_batch(self, reason: str):
+        """Request fresh batch of articles from fetcher."""
+        logger.info(f"Requesting fresh article batch: {reason}")
+        
+        # Put request in update queue for fetcher to see
+        # This uses the existing communication channel
+        if hasattr(self, 'update_queue'):
+            # For now, just log the request
+            # In future, could implement fetcher batch rotation
+            logger.debug(f"Would request fresh batch from fetcher: {reason}")
+    
     def request_fresh_articles(self):
-        """Request fresh articles from the fetcher pool."""
-        if hasattr(self, 'article_request_queue'):
-            self.article_request_queue.put(('request_refresh', {
-                'enabled_categories': list(self.enabled_categories),
-                'needed_count': 50  # Request more articles
-            })) 
+        """Legacy method - now redirects to smart batch request."""
+        self._request_fresh_batch("manual refresh request") 
