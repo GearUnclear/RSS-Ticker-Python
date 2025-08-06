@@ -495,9 +495,12 @@ class TickerGUI:
             
         # Find the longest description
         max_description = ""
-        for _, _, description in self.headlines:
-            if len(description) > len(max_description):
-                max_description = description
+        for item in self.headlines:
+            # Handle both 3-tuple and 4-tuple formats
+            if len(item) >= 3:
+                description = item[2]  # Description is always the 3rd element
+                if len(description) > len(max_description):
+                    max_description = description
                 
         if not max_description:
             self.description_height = self.min_description_height
