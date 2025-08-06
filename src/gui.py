@@ -642,36 +642,53 @@ class TickerGUI:
         info = self.category_indicators[category]
         color = info['color']
         
-        if enabled:
-            # Fill the chip background
-            self.canvas.itemconfig(f"bg_{category}", fill=color, outline=color, width=1)
-            # Black text on colored background
-            self.canvas.itemconfig(f"text_{category}", fill="#000000")
-        else:
-            # Make chip outline only
-            self.canvas.itemconfig(f"bg_{category}", fill="", outline=color, width=1)
-            # Colored text on transparent background
-            self.canvas.itemconfig(f"text_{category}", fill=color)
+        try:
+            # Check if canvas items exist before trying to update them
+            bg_items = self.canvas.find_withtag(f"bg_{category}")
+            text_items = self.canvas.find_withtag(f"text_{category}")
+            
+            if not bg_items or not text_items:
+                logger.warning(f"Canvas items not found for category {category} (bg: {len(bg_items)}, text: {len(text_items)})")
+                return
+                
+            if enabled:
+                # Fill the chip background
+                self.canvas.itemconfig(f"bg_{category}", fill=color, outline=color, width=1)
+                # Black text on colored background
+                self.canvas.itemconfig(f"text_{category}", fill="#000000")
+            else:
+                # Make chip outline only
+                self.canvas.itemconfig(f"bg_{category}", fill="", outline=color, width=1)
+                # Colored text on transparent background
+                self.canvas.itemconfig(f"text_{category}", fill=color)
+        except tk.TclError as e:
+            logger.warning(f"Error updating indicator visual for {category}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error updating indicator visual for {category}: {e}")
     
     def _on_indicator_click(self, category):
         """Handle click on category indicator for instant toggling."""
-        # Toggle the category state
-        if category in self.enabled_categories:
-            self.enabled_categories.discard(category)
-            if category in self.category_vars:
-                self.category_vars[category].set(False)
-        else:
-            self.enabled_categories.add(category)
-            if category in self.category_vars:
-                self.category_vars[category].set(True)
-        
-        # Update visual immediately
-        self._update_category_indicators()
-        
-        # Apply filter gracefully
-        self._filter_current_headlines_gracefully()
-        
-        logger.info(f"Category {category} toggled via indicator: {'enabled' if category in self.enabled_categories else 'disabled'}")
+        try:
+            # Toggle the category state
+            if category in self.enabled_categories:
+                self.enabled_categories.discard(category)
+                if category in self.category_vars:
+                    self.category_vars[category].set(False)
+            else:
+                self.enabled_categories.add(category)
+                if category in self.category_vars:
+                    self.category_vars[category].set(True)
+            
+            # Update visual immediately
+            self._update_category_indicators()
+            
+            # Apply filter gracefully
+            self._filter_current_headlines_gracefully()
+            
+            logger.info(f"Category {category} toggled via indicator: {'enabled' if category in self.enabled_categories else 'disabled'}")
+        except Exception as e:
+            logger.error(f"Error handling indicator click for {category}: {e}")
+            # Don't re-raise to prevent crash
     
     def _on_indicator_hover(self, category):
         """Show tooltip with full category name and article count on hover."""
