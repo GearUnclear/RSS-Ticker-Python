@@ -7,6 +7,7 @@ from tkinter import Menu
 from collections import deque
 import queue
 import time
+import random
 import webbrowser
 from datetime import date
 from typing import List, Dict, Optional, Tuple
@@ -52,6 +53,10 @@ class TickerGUI:
         self._running = False
         self._shutdown_callbacks = []
         self.description_text_id = None
+        
+        # Track recently shown headlines to prevent back-to-back repeats
+        self.recently_shown_indices = deque(maxlen=8)  # Remember last 8 shown
+        self.headlines_exhausted_count = 0  # Track when we've shown all headlines
         
         # Speed control
         self.speed_multiplier = 1.0  # 1.0 = normal, 2.0 = 2x speed
@@ -262,9 +267,16 @@ class TickerGUI:
             else:  # Fallback for items without category
                 filtered_items.append(item)
         
+        # Shuffle for variety while maintaining some structure
+        random.shuffle(filtered_items)
+        
         self.headlines.clear()
         self.headlines.extend(filtered_items)
         self.current_index = 0
+        
+        # Clear recent tracking when we get new headlines
+        self.recently_shown_indices.clear()
+        self.headlines_exhausted_count = 0
         
         logger.info(f"Filtered to {len(filtered_items)} headlines from {len(items)} total")
         
@@ -330,8 +342,31 @@ class TickerGUI:
             return
             
         try:
-            # Get next item
-            idx = self.current_index % len(self.headlines)
+            # Find next non-recent headline
+            headlines_count = len(self.headlines)
+            attempts = 0
+            idx = self.current_index % headlines_count
+            
+            # Try to find a headline that wasn't recently shown
+            while idx in self.recently_shown_indices and attempts < headlines_count:
+                idx = (idx + 1) % headlines_count
+                attempts += 1
+            
+            # If all headlines were recently shown, pick the oldest one
+            if attempts >= headlines_count:
+                # Clear half of the recent list to allow more variety
+                for _ in range(min(4, len(self.recently_shown_indices))):
+                    self.recently_shown_indices.popleft()
+                
+                # Shuffle headlines for variety when we've exhausted them
+                self.headlines_exhausted_count += 1
+                if self.headlines_exhausted_count >= 2:
+                    self._shuffle_headlines()
+                    self.headlines_exhausted_count = 0
+                    idx = 0  # Start from beginning after shuffle
+            
+            # Track this index as recently shown
+            self.recently_shown_indices.append(idx)
             
             # Handle both old 3-tuple and new 4-tuple format
             if len(self.headlines[idx]) == 4:
@@ -340,7 +375,7 @@ class TickerGUI:
                 text, url, description = self.headlines[idx]
                 category = 'Default'
             
-            self.current_index = idx + 1
+            self.current_index = (idx + 1) % headlines_count
             
             # Get color for this category
             text_color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
@@ -1220,4 +1255,14 @@ class TickerGUI:
             raise
         finally:
             self._running = False
-            logger.info("GUI mainloop ended") 
+            logger.info("GUI mainloop ended")
+    
+    def _shuffle_headlines(self):
+        """Shuffle headlines while preserving current display."""
+        headlines_list = list(self.headlines)
+        random.shuffle(headlines_list)
+        self.headlines.clear()
+        self.headlines.extend(headlines_list)
+        # Clear recent tracking after shuffle
+        self.recently_shown_indices.clear()
+        logger.debug("Headlines shuffled for variety") 

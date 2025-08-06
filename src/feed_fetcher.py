@@ -388,7 +388,9 @@ class FeedFetcher:
                     # Select articles for display with breaking news bias
                     display_items = self._select_articles_for_display()
                     
+                    # Always shuffle the display items before sending to GUI
                     if display_items:
+                        random.shuffle(display_items)
                         self.update_queue.put(('update', display_items))
                         logger.info(f"Sent {len(display_items)} selected items to GUI")
                     else:
@@ -397,6 +399,7 @@ class FeedFetcher:
                     # If no new items, still try to display from existing pool
                     display_items = self._select_articles_for_display()
                     if display_items:
+                        random.shuffle(display_items)
                         self.update_queue.put(('update', display_items))
                         logger.info(f"Sent {len(display_items)} items from pool to GUI")
                     else:
@@ -578,7 +581,7 @@ class FeedFetcher:
                 scored_articles.append((article, score))
         
         # Check if we need emergency variety mode (adaptive cooldown)
-        adaptive_mode = len(scored_articles) < 5  # Emergency threshold
+        adaptive_mode = len(scored_articles) < 10  # Emergency threshold (increased)
         
         if adaptive_mode:
             logger.warning(f"Emergency variety mode activated: only {len(scored_articles)} articles available")
@@ -624,6 +627,9 @@ class FeedFetcher:
             for article, score in high_priority_candidates[:high_priority_slots]:
                 selected_articles.append(article)
         
+        # Always shuffle selected articles to prevent predictable patterns
+        random.shuffle(selected_articles)
+        
         # Fill remaining slots with variety (weighted random selection)
         remaining_candidates = [item for item in scored_articles 
                               if item[0] not in selected_articles and item[1] > 0]
@@ -645,6 +651,10 @@ class FeedFetcher:
         # Update display metadata for selected articles
         self.display_cycle_count += 1
         marked_urls = 0
+        
+        # Further shuffle final selection for maximum variety
+        random.shuffle(selected_articles)
+        
         for article in selected_articles:
             article['display_count'] += 1
             article['last_displayed_cycle'] = self.display_cycle_count
