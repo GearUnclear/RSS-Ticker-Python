@@ -54,6 +54,9 @@ FEED_URLS = [
     # TECHNOLOGY SUB-SECTIONS:
     "https://rss.nytimes.com/services/xml/rss/nyt/PersonalTech.xml",
     
+    # EXTERNAL TECH FEEDS:
+    "https://techcrunch.com/feed/",  # TechCrunch - Startup and Technology News
+    
     # SPORTS SUB-SECTIONS:
     # "https://rss.nytimes.com/services/xml/rss/nyt/Baseball.xml",
     # "https://rss.nytimes.com/services/xml/rss/nyt/CollegeBasketball.xml",

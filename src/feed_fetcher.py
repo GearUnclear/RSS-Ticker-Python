@@ -210,7 +210,11 @@ class FeedFetcher:
         Returns:
             Category name
         """
-        # Extract category from URL pattern
+        # Check for TechCrunch feed
+        if 'techcrunch.com' in feed_url:
+            return 'Technology'
+            
+        # Extract category from NYT URL pattern
         match = re.search(r'/rss/nyt/([^/.]+)\.xml', feed_url)
         if match:
             category = match.group(1)
