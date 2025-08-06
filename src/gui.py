@@ -40,7 +40,7 @@ class TickerGUI:
     def __init__(self, update_queue: queue.Queue):
         self.update_queue = update_queue
         today_str = date.today().strftime("%B %d, %Y")
-        self.headlines = deque([(f"🗞️ BREAKING: Loading Today's Premium NYT Coverage for {today_str} • Stay Informed with Real-Time News Updates {BULLET}", "", f"Loading the latest news stories from The New York Times for {today_str}. Please wait while we fetch your personalized news feed with the most current and relevant stories.", "Default")])
+        self.headlines = deque([(f"Thanks for using Easy-RSS-🐍! • {today_str} {BULLET}", "", f"Welcome to Easy-RSS-Python! Fetching the latest news from multiple sources.", "Default")])
         self.current_index = 0
         self.paused = False
         self.show_descriptions = False  
