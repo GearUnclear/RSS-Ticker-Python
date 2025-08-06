@@ -49,6 +49,14 @@ class TickerGUI:
         self._shutdown_callbacks = []
         self.description_text_id = None
         
+        # Speed control
+        self.speed_multiplier = 1.0  # 1.0 = normal, 2.0 = 2x speed
+        self.base_scroll_delay = SCROLL_DELAY_MS
+        
+        # Category filtering
+        self.enabled_categories = {'Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion', 'Default'}
+        self.category_vars = {}  # Will hold tkinter BooleanVar instances
+        
         # Dynamic height based on description setting
         self.base_height = TICKER_HEIGHT_PX
         self.min_description_height = 30  # Minimum additional height (increased)
@@ -160,16 +168,32 @@ class TickerGUI:
 
         self.canvas.tag_bind("close_btn", "<Button-1>", lambda e: self.close_app())
         
-        # Create context menu
+        # Create context menu with submenus
         self.context_menu = Menu(self.root, tearoff=0)
         self.context_menu.add_command(label="Pause/Resume", command=self.toggle_pause)
         self.context_menu.add_separator()
+        
+        # Show descriptions checkbox
         self.show_descriptions_var = tk.BooleanVar(value=self.show_descriptions)
         self.context_menu.add_checkbutton(
             label="Show Descriptions", 
             command=self.toggle_descriptions,
             variable=self.show_descriptions_var
         )
+        
+        self.context_menu.add_separator()
+        
+        # Speed control submenu
+        self.speed_menu = Menu(self.context_menu, tearoff=0)
+        self.speed_var = tk.StringVar(value="normal")
+        self.speed_menu.add_radiobutton(label="Normal Speed", variable=self.speed_var, value="normal", command=self.set_normal_speed)
+        self.speed_menu.add_radiobutton(label="2x Speed", variable=self.speed_var, value="double", command=self.set_double_speed)
+        self.context_menu.add_cascade(label="Speed", menu=self.speed_menu)
+        
+        # Categories control submenu
+        self.categories_menu = Menu(self.context_menu, tearoff=0)
+        self._setup_category_menu()
+        self.context_menu.add_cascade(label="Categories", menu=self.categories_menu)
         
         # Keep window on top periodically
         self.maintain_topmost()
@@ -207,9 +231,25 @@ class TickerGUI:
     def _handle_update(self, items: List[Tuple[str, str, str, str]]):
         """Handle headline updates."""
         logger.info(f"Received {len(items)} headlines from fetch thread")
+        
+        # Store all headlines for filtering
+        self.all_headlines = items
+        
+        # Filter by enabled categories
+        filtered_items = []
+        for item in items:
+            if len(item) >= 4:  # Has category
+                category = item[3]
+                if category in self.enabled_categories:
+                    filtered_items.append(item)
+            else:  # Fallback for items without category
+                filtered_items.append(item)
+        
         self.headlines.clear()
-        self.headlines.extend(items)
+        self.headlines.extend(filtered_items)
         self.current_index = 0
+        
+        logger.info(f"Filtered to {len(filtered_items)} headlines from {len(items)} total")
         
         # Update description height based on new content
         self.calculate_optimal_description_height()
@@ -373,9 +413,10 @@ class TickerGUI:
         except Exception as e:
             logger.error(f"Error in scroll: {e}")
             
-        # Schedule next scroll
+        # Schedule next scroll with dynamic delay
         if self._running:
-            self.root.after(SCROLL_DELAY_MS, self.scroll_text)
+            current_delay = int(self.base_scroll_delay / self.speed_multiplier)
+            self.root.after(current_delay, self.scroll_text)
             
     def toggle_pause(self):
         """Toggle pause state."""
@@ -443,6 +484,62 @@ class TickerGUI:
         except tk.TclError:
             pass
             
+    def _setup_category_menu(self):
+        """Setup category checkboxes in the context menu."""
+        available_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion']
+        
+        for category in available_categories:
+            var = tk.BooleanVar(value=category in self.enabled_categories)
+            self.category_vars[category] = var
+            self.categories_menu.add_checkbutton(
+                label=category,
+                variable=var,
+                command=lambda c=category: self.toggle_category(c)
+            )
+    
+    def set_normal_speed(self):
+        """Set scrolling to normal speed."""
+        self.speed_multiplier = 1.0
+        logger.info("Speed set to normal (1x)")
+    
+    def set_double_speed(self):
+        """Set scrolling to double speed."""
+        self.speed_multiplier = 2.0
+        logger.info("Speed set to double (2x)")
+    
+    def toggle_category(self, category: str):
+        """Toggle visibility of a specific category."""
+        if self.category_vars[category].get():
+            self.enabled_categories.add(category)
+            logger.info(f"Enabled category: {category}")
+        else:
+            self.enabled_categories.discard(category)
+            logger.info(f"Disabled category: {category}")
+        
+        # Filter current headlines
+        self._filter_current_headlines()
+    
+    def _filter_current_headlines(self):
+        """Filter current headlines based on enabled categories."""
+        if not hasattr(self, 'all_headlines'):
+            return
+            
+        # Filter headlines by enabled categories
+        filtered_headlines = []
+        for item in self.all_headlines:
+            if len(item) >= 4:  # Has category
+                category = item[3]
+                if category in self.enabled_categories:
+                    filtered_headlines.append(item)
+            else:  # Fallback for items without category
+                filtered_headlines.append(item)
+        
+        # Update headlines deque
+        self.headlines.clear()
+        self.headlines.extend(filtered_headlines)
+        
+        logger.info(f"Filtered headlines: {len(filtered_headlines)} visible from {len(self.all_headlines)} total")
+    
     def toggle_descriptions(self):
         """Toggle the display of descriptions."""
         self.show_descriptions = not self.show_descriptions
