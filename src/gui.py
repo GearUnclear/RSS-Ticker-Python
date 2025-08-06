@@ -17,8 +17,8 @@ try:
         SCROLL_DELAY_MS, PIXELS_PER_STEP, MIN_HEADLINE_GAP, BULLET,
         PAUSE_ICON, CLOSE_ICON, FONT_SIZE_PAUSE, FONT_SIZE_CLOSE,
         TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS,
-        INDICATOR_SIZE, INDICATOR_SPACING, INDICATOR_MARGIN_X, INDICATOR_MARGIN_Y,
-        INDICATOR_HOVER_SCALE, INDICATOR_ANIMATION_MS
+        INDICATOR_WIDTH, INDICATOR_HEIGHT, INDICATOR_SPACING, INDICATOR_MARGIN_X, INDICATOR_MARGIN_Y,
+        INDICATOR_CORNER_RADIUS, INDICATOR_ANIMATION_MS
     )
     from .exceptions import InvalidURLError
     from .logger import logger
@@ -30,8 +30,8 @@ except ImportError:
         SCROLL_DELAY_MS, PIXELS_PER_STEP, MIN_HEADLINE_GAP, BULLET,
         PAUSE_ICON, CLOSE_ICON, FONT_SIZE_PAUSE, FONT_SIZE_CLOSE,
         TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS,
-        INDICATOR_SIZE, INDICATOR_SPACING, INDICATOR_MARGIN_X, INDICATOR_MARGIN_Y,
-        INDICATOR_HOVER_SCALE, INDICATOR_ANIMATION_MS
+        INDICATOR_WIDTH, INDICATOR_HEIGHT, INDICATOR_SPACING, INDICATOR_MARGIN_X, INDICATOR_MARGIN_Y,
+        INDICATOR_CORNER_RADIUS, INDICATOR_ANIMATION_MS
     )
     from exceptions import InvalidURLError
     from logger import logger
@@ -57,17 +57,16 @@ class TickerGUI:
         self.speed_multiplier = 1.0  # 1.0 = normal, 2.0 = 2x speed
         self.base_scroll_delay = SCROLL_DELAY_MS
         
-        # Category filtering
-        self.enabled_categories = {'Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion', 'Default'}
+        # Category filtering - Initialize with active categories only
         self.category_vars = {}  # Will hold tkinter BooleanVar instances
+        # Will be set after window setup when we can detect active categories
         
         # Apple-style category indicators
-        self.category_indicators = {}  # Canvas items for dots
+        self.category_indicators = {}  # Canvas items for chips
         self.indicator_tooltips = {}   # Tooltip tracking
-        self.main_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage']  # Primary categories to show
         
-        # Dynamic height based on description setting
-        self.base_height = TICKER_HEIGHT_PX
+        # Dynamic height based on description setting - now includes indicator space
+        self.base_height = TICKER_HEIGHT_PX + 12  # +12px for compact indicator strip
         self.min_description_height = 30  # Minimum additional height (increased)
         self.max_description_height = 200  # Maximum additional height (increased for long descriptions)
         self.description_height = self.min_description_height
@@ -76,6 +75,10 @@ class TickerGUI:
         # Setup window
         self.root = tk.Tk()
         self.setup_window()
+        
+        # Initialize enabled categories with active categories + Default
+        active_categories = self._get_active_categories()
+        self.enabled_categories = set(active_categories + ['Default'])
         
         # Setup UI elements
         self.setup_ui()
@@ -146,7 +149,7 @@ class TickerGUI:
             logger.warning(f"Font {FONT_FAMILY} not available, using default")
             self.font = tkfont.Font(family="TkDefaultFont", size=FONT_SIZE)
             
-        self.text_y = self.base_height // 2  # Always in upper half for main headlines
+        self.text_y = (self.base_height + 12) // 2  # Position below indicator strip (12px buffer)
         
         # Pause indicator
         self.pause_id = self.canvas.create_text(
@@ -497,50 +500,85 @@ class TickerGUI:
             pass
             
     def _setup_category_indicators(self):
-        """Setup Apple-style category indicator dots."""
+        """Setup compact Apple-style category micro-chips."""
+        # Get only categories that have active feeds
+        active_categories = self._get_active_categories()
+        
         x = INDICATOR_MARGIN_X
         y = INDICATOR_MARGIN_Y
         
-        for i, category in enumerate(self.main_categories):
+        # Category abbreviations for compact display
+        category_abbrev = {
+            'Politics': 'POL',
+            'Technology': 'TECH', 
+            'HomePage': 'HOME',
+            'Business': 'BIZ',
+            'World': 'WORLD',
+            'Science': 'SCI',
+            'Sports': 'SPORT',
+            'Arts': 'ARTS',
+            'Health': 'HEALTH',
+            'Opinion': 'OP'
+        }
+        
+        for i, category in enumerate(active_categories):
             # Calculate position
-            dot_x = x + i * (INDICATOR_SIZE + INDICATOR_SPACING)
-            dot_y = y
+            chip_x = x + i * (INDICATOR_WIDTH + INDICATOR_SPACING)
+            chip_y = y
             
-            # Get category color
+            # Get category color and abbreviation
             color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
+            abbrev = category_abbrev.get(category, category[:3])
             
-            # Create indicator dot
+            # Create indicator micro-chip
             is_enabled = category in self.enabled_categories
-            dot_id = self._create_indicator_dot(dot_x, dot_y, color, is_enabled, category)
+            chip_id = self._create_indicator_chip(chip_x, chip_y, color, is_enabled, category, abbrev)
             
             self.category_indicators[category] = {
-                'dot_id': dot_id,
-                'x': dot_x,
-                'y': dot_y,
+                'chip_id': chip_id,
+                'x': chip_x,
+                'y': chip_y,
                 'color': color,
-                'enabled': is_enabled
+                'enabled': is_enabled,
+                'abbrev': abbrev
             }
     
-    def _create_indicator_dot(self, x, y, color, filled, category):
-        """Create a single indicator dot with Apple-style design."""
-        radius = INDICATOR_SIZE // 2
+    def _create_indicator_chip(self, x, y, color, enabled, category, abbrev):
+        """Create a compact micro-chip indicator with Apple-style design."""
+        # Create rounded rectangle background
+        x1, y1 = x, y
+        x2, y2 = x + INDICATOR_WIDTH, y + INDICATOR_HEIGHT
         
-        if filled:
-            # Filled circle for enabled categories
-            dot_id = self.canvas.create_oval(
-                x - radius, y - radius, x + radius, y + radius,
+        if enabled:
+            # Filled chip for enabled categories
+            bg_id = self.canvas.create_rectangle(
+                x1, y1, x2, y2,
                 fill=color, outline=color, width=1,
-                tags=("category_indicator", f"indicator_{category}")
+                tags=("category_indicator", f"indicator_{category}", f"bg_{category}")
             )
+            text_color = "#000000"  # Black text on colored background
         else:
-            # Hollow circle for disabled categories
-            dot_id = self.canvas.create_oval(
-                x - radius, y - radius, x + radius, y + radius,
-                fill="", outline=color, width=2,
-                tags=("category_indicator", f"indicator_{category}")
+            # Outline chip for disabled categories
+            bg_id = self.canvas.create_rectangle(
+                x1, y1, x2, y2,
+                fill="", outline=color, width=1,
+                tags=("category_indicator", f"indicator_{category}", f"bg_{category}")
             )
+            text_color = color  # Colored text on transparent background
         
-        # Bind click and hover events
+        # Add abbreviated text label
+        text_x = x + INDICATOR_WIDTH // 2
+        text_y = y + INDICATOR_HEIGHT // 2
+        text_id = self.canvas.create_text(
+            text_x, text_y,
+            text=abbrev,
+            font=("Arial", 6, "bold"),  # Very small font for compact design
+            fill=text_color,
+            anchor="center",
+            tags=("category_indicator", f"indicator_{category}", f"text_{category}")
+        )
+        
+        # Bind click and hover events to both background and text
         self.canvas.tag_bind(f"indicator_{category}", "<Button-1>", 
                            lambda e, c=category: self._on_indicator_click(c))
         self.canvas.tag_bind(f"indicator_{category}", "<Enter>", 
@@ -548,7 +586,41 @@ class TickerGUI:
         self.canvas.tag_bind(f"indicator_{category}", "<Leave>", 
                            lambda e, c=category: self._on_indicator_leave(c))
         
-        return dot_id
+        return bg_id  # Return background ID as primary identifier
+    
+    def _get_active_categories(self):
+        """Get list of categories that actually have RSS feeds configured."""
+        from .config import FEED_URLS
+        
+        active_categories = set()
+        
+        # Analyze FEED_URLS to determine which categories have feeds
+        for feed_url in FEED_URLS:
+            if 'techcrunch.com' in feed_url or 'wired.com' in feed_url:
+                active_categories.add('Technology')
+            elif '/Politics.xml' in feed_url:
+                active_categories.add('Politics')
+            elif '/HomePage.xml' in feed_url:
+                active_categories.add('HomePage')
+            elif '/Technology.xml' in feed_url or '/PersonalTech.xml' in feed_url:
+                active_categories.add('Technology')
+            elif '/Business.xml' in feed_url:
+                active_categories.add('Business')
+            elif '/World.xml' in feed_url or '/US.xml' in feed_url:
+                active_categories.add('World')
+            elif '/Science.xml' in feed_url:
+                active_categories.add('Science')
+            elif '/Sports.xml' in feed_url:
+                active_categories.add('Sports')
+            elif '/Arts.xml' in feed_url or '/Style.xml' in feed_url:
+                active_categories.add('Arts')
+            elif '/Health.xml' in feed_url:
+                active_categories.add('Health')
+            elif '/Opinion.xml' in feed_url:
+                active_categories.add('Opinion')
+        
+        # Return sorted list for consistent ordering
+        return sorted(list(active_categories))
     
     def _update_category_indicators(self):
         """Update indicator visual states based on enabled categories."""
@@ -565,15 +637,18 @@ class TickerGUI:
             return
             
         info = self.category_indicators[category]
-        dot_id = info['dot_id']
         color = info['color']
         
         if enabled:
-            # Fill the circle
-            self.canvas.itemconfig(dot_id, fill=color, outline=color, width=1)
+            # Fill the chip background
+            self.canvas.itemconfig(f"bg_{category}", fill=color, outline=color, width=1)
+            # Black text on colored background
+            self.canvas.itemconfig(f"text_{category}", fill="#000000")
         else:
-            # Make it hollow
-            self.canvas.itemconfig(dot_id, fill="", outline=color, width=2)
+            # Make chip outline only
+            self.canvas.itemconfig(f"bg_{category}", fill="", outline=color, width=1)
+            # Colored text on transparent background
+            self.canvas.itemconfig(f"text_{category}", fill=color)
     
     def _on_indicator_click(self, category):
         """Handle click on category indicator for instant toggling."""
@@ -596,20 +671,55 @@ class TickerGUI:
         logger.info(f"Category {category} toggled via indicator: {'enabled' if category in self.enabled_categories else 'disabled'}")
     
     def _on_indicator_hover(self, category):
-        """Show tooltip and subtle hover effect on indicator."""
+        """Show tooltip with full category name and article count on hover."""
         # Get article count for this category
         count = self._get_category_article_count(category)
         status = "enabled" if category in self.enabled_categories else "disabled"
         
-        # Simple hover effect - slight scale (would need more complex implementation for actual scaling)
-        # For now, just change cursor
+        # Change cursor to indicate clickable
         self.canvas.configure(cursor="hand2")
+        
+        # Create tooltip popup (simple implementation)
+        self._show_tooltip(category, count, status)
         
         logger.debug(f"Hovering {category}: {count} articles, {status}")
     
+    def _show_tooltip(self, category, count, status):
+        """Show a compact tooltip with category info."""
+        # Create a small tooltip rectangle near the indicator
+        if category in self.category_indicators:
+            info = self.category_indicators[category]
+            x, y = info['x'], info['y']
+            
+            # Position tooltip below the chip
+            tooltip_x = x
+            tooltip_y = y + INDICATOR_HEIGHT + 2
+            
+            # Create tooltip background
+            tooltip_text = f"{category}: {count} articles ({status})"
+            tooltip_id = self.canvas.create_text(
+                tooltip_x, tooltip_y,
+                text=tooltip_text,
+                font=("Arial", 7),
+                fill="#FFFFFF",
+                anchor="nw",
+                tags=("tooltip", f"tooltip_{category}")
+            )
+            
+            # Store tooltip ID for cleanup
+            self.indicator_tooltips[category] = tooltip_id
+    
     def _on_indicator_leave(self, category):
-        """Remove hover effects."""
+        """Remove hover effects and cleanup tooltip."""
         self.canvas.configure(cursor="")
+        
+        # Remove tooltip if exists
+        if category in self.indicator_tooltips:
+            try:
+                self.canvas.delete(self.indicator_tooltips[category])
+            except tk.TclError:
+                pass
+            del self.indicator_tooltips[category]
     
     def _get_category_article_count(self, category):
         """Get count of articles in a specific category."""
@@ -624,7 +734,8 @@ class TickerGUI:
     
     def _setup_category_menu(self):
         """Setup category checkboxes in the context menu with article counts."""
-        available_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion']
+        # Only show categories that have active RSS feeds
+        available_categories = self._get_active_categories()
         
         for category in available_categories:
             var = tk.BooleanVar(value=category in self.enabled_categories)
@@ -676,8 +787,8 @@ class TickerGUI:
         # Clear existing menu items
         self.categories_menu.delete(0, "end")
         
-        # Recreate with updated counts
-        available_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion']
+        # Recreate with updated counts - only show active categories
+        available_categories = self._get_active_categories()
         
         for category in available_categories:
             if category not in self.category_vars:
