@@ -210,8 +210,8 @@ class FeedFetcher:
         Returns:
             Category name
         """
-        # Check for TechCrunch feed
-        if 'techcrunch.com' in feed_url:
+        # Check for external tech feeds
+        if 'techcrunch.com' in feed_url or 'wired.com' in feed_url:
             return 'Technology'
             
         # Extract category from NYT URL pattern

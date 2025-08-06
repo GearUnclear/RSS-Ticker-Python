@@ -56,6 +56,7 @@ FEED_URLS = [
     
     # EXTERNAL TECH FEEDS:
     "https://techcrunch.com/feed/",  # TechCrunch - Startup and Technology News
+    "https://www.wired.com/feed/rss",  # WIRED - Technology, Science, and Culture
     
     # SPORTS SUB-SECTIONS:
     # "https://rss.nytimes.com/services/xml/rss/nyt/Baseball.xml",
