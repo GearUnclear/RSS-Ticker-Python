@@ -54,9 +54,10 @@ class TickerGUI:
         self._shutdown_callbacks = []
         self.description_text_id = None
         
-        # Track recently shown headlines to prevent back-to-back repeats
-        self.recently_shown_indices = deque(maxlen=8)  # Remember last 8 shown
-        self.headlines_exhausted_count = 0  # Track when we've shown all headlines
+        # Direct pool streaming - eliminate batching bottleneck
+        self.article_request_queue = queue.Queue()  # Request articles from fetcher
+        self.sliding_window_shown = deque(maxlen=50)  # Track last 50 shown articles by URL
+        self.last_article_time = {}  # URL -> timestamp of last display
         
         # Speed control
         self.speed_multiplier = 1.0  # 1.0 = normal, 2.0 = 2x speed
@@ -246,6 +247,22 @@ class TickerGUI:
         except Exception as e:
             logger.error(f"Error checking updates: {e}")
             
+        # Process article requests from GUI
+        try:
+            while True:
+                try:
+                    request_type, data = self.article_request_queue.get_nowait()
+                    if request_type == 'request_article':
+                        # GUI is asking for next article - could implement direct fetcher communication here
+                        logger.debug(f"GUI requested article with categories: {data['enabled_categories']}")
+                    elif request_type == 'request_refresh':
+                        # GUI needs more articles - trigger refresh
+                        logger.debug(f"GUI requested refresh for {data['needed_count']} articles")
+                except queue.Empty:
+                    break
+        except Exception as e:
+            logger.error(f"Error processing article requests: {e}")
+            
         # Schedule next check
         if self._running:
             self.root.after(500, self.check_updates)
@@ -274,9 +291,9 @@ class TickerGUI:
         self.headlines.extend(filtered_items)
         self.current_index = 0
         
-        # Clear recent tracking when we get new headlines
-        self.recently_shown_indices.clear()
-        self.headlines_exhausted_count = 0
+        # Reset tracking for new headlines (but preserve sliding window)
+        # sliding_window_shown persists across updates to prevent cross-batch repeats
+        logger.debug(f"Updated headlines, sliding window has {len(self.sliding_window_shown)} recent articles")
         
         logger.info(f"Filtered to {len(filtered_items)} headlines from {len(items)} total")
         
@@ -337,48 +354,36 @@ class TickerGUI:
         return right_edge <= (self.screen_width - MIN_HEADLINE_GAP)
         
     def load_next_item(self):
-        """Load the next headline as a new text item."""
-        if not self._running or not self.headlines:
+        """Load the next headline directly from the article pool."""
+        if not self._running:
             return
             
         try:
-            # Find next non-recent headline
-            headlines_count = len(self.headlines)
-            attempts = 0
-            idx = self.current_index % headlines_count
+            # Request next article directly from fetcher pool
+            self.article_request_queue.put(('request_article', {
+                'enabled_categories': list(self.enabled_categories),
+                'recently_shown': list(self.sliding_window_shown),
+                'last_shown_times': dict(self.last_article_time)
+            }))
             
-            # Try to find a headline that wasn't recently shown
-            while idx in self.recently_shown_indices and attempts < headlines_count:
-                idx = (idx + 1) % headlines_count
-                attempts += 1
-            
-            # If all headlines were recently shown, pick the oldest one
-            if attempts >= headlines_count:
-                # Clear half of the recent list to allow more variety
-                for _ in range(min(4, len(self.recently_shown_indices))):
-                    self.recently_shown_indices.popleft()
-                
-                # Shuffle headlines for variety when we've exhausted them
-                self.headlines_exhausted_count += 1
-                if self.headlines_exhausted_count >= 2:
-                    self._shuffle_headlines()
-                    self.headlines_exhausted_count = 0
-                    idx = 0  # Start from beginning after shuffle
-            
-            # Track this index as recently shown
-            self.recently_shown_indices.append(idx)
-            
-            # Handle both old 3-tuple and new 4-tuple format
-            if len(self.headlines[idx]) == 4:
-                text, url, description, category = self.headlines[idx]
+            # Try to get article from headlines buffer (fallback for now)
+            if self.headlines:
+                # Use time-decay scoring for article selection
+                best_article = self._select_best_available_article()
+                if best_article:
+                    text, url, description, category = best_article
+                    
+                    # Track article as shown
+                    current_time = time.time()
+                    self.sliding_window_shown.append(url)
+                    self.last_article_time[url] = current_time
+                    
+                    # Get color for this category
+                    text_color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
+                else:
+                    return  # No suitable article found
             else:
-                text, url, description = self.headlines[idx]
-                category = 'Default'
-            
-            self.current_index = (idx + 1) % headlines_count
-            
-            # Get color for this category
-            text_color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
+                return  # No articles available
             
             # Add subtle category prefix for clarity
             category_prefix = {
@@ -1257,12 +1262,90 @@ class TickerGUI:
             self._running = False
             logger.info("GUI mainloop ended")
     
-    def _shuffle_headlines(self):
-        """Shuffle headlines while preserving current display."""
-        headlines_list = list(self.headlines)
-        random.shuffle(headlines_list)
-        self.headlines.clear()
-        self.headlines.extend(headlines_list)
-        # Clear recent tracking after shuffle
-        self.recently_shown_indices.clear()
-        logger.debug("Headlines shuffled for variety") 
+    def _apply_smart_balancing(self, filtered_headlines, category_counts):
+        """Apply smart category balancing when content is scarce."""
+        if not self.all_headlines:
+            return filtered_headlines
+            
+        # Category relationships for smart expansion
+        category_expansion = {
+            'Politics': ['HomePage', 'World'],  # Politics can expand to HomePage/World
+            'Technology': ['Business'],  # Technology can expand to Business
+            'HomePage': ['Politics', 'World'],  # HomePage can expand to Politics/World
+            'World': ['Politics', 'HomePage'],  # World can expand to Politics/HomePage
+        }
+        
+        expanded_headlines = list(filtered_headlines)  # Start with filtered
+        added_count = 0
+        
+        # For each enabled category with few articles, add related content
+        for enabled_category in self.enabled_categories:
+            current_count = category_counts.get(enabled_category, 0)
+            
+            if current_count < 5:  # If category has < 5 articles
+                related_categories = category_expansion.get(enabled_category, [])
+                
+                for related_cat in related_categories:
+                    for item in self.all_headlines:
+                        if len(item) >= 4 and item[3] == related_cat:
+                            if item not in expanded_headlines:
+                                expanded_headlines.append(item)
+                                added_count += 1
+                                if added_count >= 10:  # Limit expansion
+                                    break
+                    if added_count >= 10:
+                        break
+                        
+        if added_count > 0:
+            logger.info(f"Smart balancing added {added_count} related articles for variety")
+            
+        return expanded_headlines
+    
+    def _select_best_available_article(self):
+        """Select best article using time-decay scoring."""
+        if not self.headlines:
+            return None
+            
+        current_time = time.time()
+        best_score = -1
+        best_article = None
+        
+        for item in self.headlines:
+            if len(item) >= 4:
+                text, url, description, category = item
+            else:
+                text, url, description = item
+                category = 'Default'
+                
+            # Skip if category is disabled
+            if category not in self.enabled_categories:
+                continue
+                
+            # Calculate time-decay score
+            last_shown = self.last_article_time.get(url, 0)
+            time_since_shown = current_time - last_shown
+            
+            # Base score from time decay (more time = higher score)
+            time_score = min(time_since_shown / 300, 10)  # Max 10 points after 5 minutes
+            
+            # Bonus for never-shown articles
+            novelty_bonus = 20 if last_shown == 0 else 0
+            
+            # Penalty if in sliding window (recently shown)
+            recent_penalty = -100 if url in self.sliding_window_shown else 0
+            
+            total_score = time_score + novelty_bonus + recent_penalty
+            
+            if total_score > best_score:
+                best_score = total_score
+                best_article = item
+                
+        return best_article
+    
+    def request_fresh_articles(self):
+        """Request fresh articles from the fetcher pool."""
+        if hasattr(self, 'article_request_queue'):
+            self.article_request_queue.put(('request_refresh', {
+                'enabled_categories': list(self.enabled_categories),
+                'needed_count': 50  # Request more articles
+            })) 

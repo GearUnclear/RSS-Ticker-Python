@@ -12,6 +12,7 @@ import asyncio
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional, Dict
+from collections import deque
 import re
 
 import feedparser
@@ -53,9 +54,13 @@ class FeedFetcher:
         self._thread: Optional[threading.Thread] = None
         self._ssl_verify_failed = False
         
-        # Article pool with priority tracking
+        # Enhanced article pool with direct access
         self.article_pool: List[Dict] = []
         self.display_cycle_count = 0
+        self.article_pool_lock = threading.Lock()  # Thread safety for pool access
+        
+        # Global sliding window for cross-session continuity
+        self.global_shown_articles = deque(maxlen=200)  # Track 200 recent articles globally
         
         # Long-term article memory across sessions
         self.article_memory = ArticleMemory()
@@ -388,20 +393,22 @@ class FeedFetcher:
                     # Select articles for display with breaking news bias
                     display_items = self._select_articles_for_display()
                     
-                    # Always shuffle the display items before sending to GUI
+                    # Send ALL articles to GUI, let GUI select dynamically
                     if display_items:
-                        random.shuffle(display_items)
-                        self.update_queue.put(('update', display_items))
-                        logger.info(f"Sent {len(display_items)} selected items to GUI")
+                        # Send larger batch for GUI to choose from
+                        all_available = self._get_all_available_articles()
+                        random.shuffle(all_available)
+                        self.update_queue.put(('update', all_available[:100]))  # Send up to 100 articles
+                        logger.info(f"Sent {len(all_available[:100])} available articles to GUI")
                     else:
                         self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "", "Default")]))
                 else:
-                    # If no new items, still try to display from existing pool
-                    display_items = self._select_articles_for_display()
-                    if display_items:
-                        random.shuffle(display_items)
-                        self.update_queue.put(('update', display_items))
-                        logger.info(f"Sent {len(display_items)} items from pool to GUI")
+                    # Send available articles from existing pool
+                    all_available = self._get_all_available_articles()
+                    if all_available:
+                        random.shuffle(all_available)
+                        self.update_queue.put(('update', all_available[:100]))
+                        logger.info(f"Sent {len(all_available[:100])} pooled articles to GUI")
                     else:
                         self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "", "Default")]))
                     
@@ -725,4 +732,97 @@ class FeedFetcher:
             if score > 0:
                 stats['available_articles'] += 1
         
-        return stats 
+        return stats
+    
+    def _get_all_available_articles(self) -> List[Tuple[str, str, str, str]]:
+        """Get all articles from pool in displayable format."""
+        with self.article_pool_lock:
+            all_articles = []
+            current_time = time.time()
+            
+            for article in self.article_pool:
+                # Convert to tuple format for GUI
+                article_tuple = (
+                    article['display_text'],
+                    article['url'],
+                    article['description'], 
+                    article.get('category', 'Default')
+                )
+                all_articles.append(article_tuple)
+                
+            logger.debug(f"Retrieved {len(all_articles)} articles from pool")
+            return all_articles
+    
+    def get_article_by_criteria(self, enabled_categories: List[str], 
+                               recently_shown: List[str],
+                               last_shown_times: Dict[str, float]) -> Optional[Tuple[str, str, str, str]]:
+        """Get best article based on GUI criteria with time-decay scoring."""
+        with self.article_pool_lock:
+            if not self.article_pool:
+                return None
+                
+            current_time = time.time()
+            best_score = -1
+            best_article = None
+            
+            for article in self.article_pool:
+                url = article['url']
+                category = article.get('category', 'Default')
+                
+                # Skip disabled categories
+                if category not in enabled_categories:
+                    continue
+                    
+                # Calculate comprehensive score
+                score = self._calculate_gui_article_score(
+                    article, current_time, recently_shown, last_shown_times
+                )
+                
+                if score > best_score:
+                    best_score = score
+                    best_article = article
+                    
+            if best_article:
+                # Mark as shown in global tracking
+                self.global_shown_articles.append(best_article['url'])
+                return (
+                    best_article['display_text'],
+                    best_article['url'],
+                    best_article['description'],
+                    best_article.get('category', 'Default')
+                )
+                
+            return None
+    
+    def _calculate_gui_article_score(self, article: Dict, current_time: float,
+                                   recently_shown: List[str], 
+                                   last_shown_times: Dict[str, float]) -> float:
+        """Calculate article score for GUI selection with advanced criteria."""
+        url = article['url']
+        
+        # Base time decay score
+        last_shown = last_shown_times.get(url, 0)
+        time_since_shown = current_time - last_shown if last_shown else float('inf')
+        
+        # Time decay: more time = higher score
+        if time_since_shown == float('inf'):
+            time_score = 50  # Never shown bonus
+        else:
+            time_score = min(time_since_shown / 60, 30)  # Max 30 points after 30 minutes
+            
+        # Heavy penalty for recently shown articles
+        recent_penalty = -1000 if url in recently_shown else 0
+        
+        # Global sliding window penalty
+        global_recent_penalty = -500 if url in self.global_shown_articles else 0
+        
+        # Article freshness bonus
+        hours_since_fetch = (datetime.now() - article['first_seen']).total_seconds() / 3600
+        freshness_bonus = max(10 - hours_since_fetch, 0)  # Bonus for articles < 10 hours old
+        
+        # Display count penalty (prefer less-shown articles)
+        display_penalty = -article['display_count'] * 5
+        
+        total_score = time_score + recent_penalty + global_recent_penalty + freshness_bonus + display_penalty
+        
+        return total_score 
