@@ -64,6 +64,8 @@ class TickerGUI:
         # Apple-style category indicators
         self.category_indicators = {}  # Canvas items for chips
         self.indicator_tooltips = {}   # Tooltip tracking
+        self.hover_states = {}          # Track hover state to prevent re-entrance
+        self.last_hover_time = {}       # Track last hover time for debouncing
         
         # Dynamic height based on description setting - now includes indicator space
         self.base_height = TICKER_HEIGHT_PX + 12  # +12px for compact indicator strip
@@ -445,9 +447,23 @@ class TickerGUI:
     def open_link(self, event):
         """Open the URL of the clicked headline."""
         try:
+            click_x = event.x
+            click_y = event.y
+            
+            # First check if click is on a category indicator
+            # This prevents "No clickable item found" when clicking indicators
+            for category, info in self.category_indicators.items():
+                # Check if click is within indicator bounds
+                ind_x = info['x']
+                ind_y = info['y']
+                if (ind_x <= click_x <= ind_x + INDICATOR_WIDTH and
+                    ind_y <= click_y <= ind_y + INDICATOR_HEIGHT):
+                    # Click is on an indicator, let the tag handler handle it
+                    # Don't log anything, just return
+                    return
+            
             # Find which text item was clicked
             clicked_item = None
-            click_x = event.x
             
             for item in self.text_items:
                 try:
@@ -692,12 +708,29 @@ class TickerGUI:
     
     def _on_indicator_hover(self, category):
         """Show tooltip with full category name and article count on hover."""
+        # Check if already hovering to prevent re-entrance
+        if self.hover_states.get(category, False):
+            return
+            
+        # Debouncing: ignore if hover was triggered too recently
+        current_time = time.time()
+        last_time = self.last_hover_time.get(category, 0)
+        if current_time - last_time < 0.1:  # 100ms debounce
+            return
+            
+        # Set hover state and update time
+        self.hover_states[category] = True
+        self.last_hover_time[category] = current_time
+        
         # Get article count for this category
         count = self._get_category_article_count(category)
         status = "enabled" if category in self.enabled_categories else "disabled"
         
         # Change cursor to indicate clickable
         self.canvas.configure(cursor="hand2")
+        
+        # Clean up any existing tooltip before creating new one
+        self._cleanup_tooltip(category)
         
         # Create tooltip popup (simple implementation)
         self._show_tooltip(category, count, status)
@@ -711,35 +744,88 @@ class TickerGUI:
             info = self.category_indicators[category]
             x, y = info['x'], info['y']
             
-            # Position tooltip below the chip
+            # Position tooltip further below the chip to prevent interference
             tooltip_x = x
-            tooltip_y = y + INDICATOR_HEIGHT + 2
+            tooltip_y = y + INDICATOR_HEIGHT + 10  # Increased spacing
             
-            # Create tooltip background
+            # Prepare tooltip text
             tooltip_text = f"{category}: {count} articles ({status})"
-            tooltip_id = self.canvas.create_text(
+            
+            # Create text first to measure bounds
+            text_id = self.canvas.create_text(
                 tooltip_x, tooltip_y,
                 text=tooltip_text,
-                font=("Arial", 7),
-                fill="#FFFFFF",
+                font=("Arial", 8),
+                fill="#000000",  # Black text
                 anchor="nw",
-                tags=("tooltip", f"tooltip_{category}")
+                tags=("tooltip", f"tooltip_text_{category}")
             )
             
-            # Store tooltip ID for cleanup
-            self.indicator_tooltips[category] = tooltip_id
+            # Get text bounds for background
+            bbox = self.canvas.bbox(text_id)
+            if bbox:
+                # Add padding around text
+                padding = 3
+                x1, y1, x2, y2 = bbox
+                x1 -= padding
+                y1 -= padding
+                x2 += padding
+                y2 += padding
+                
+                # Ensure tooltip stays within canvas bounds
+                canvas_width = self.canvas.winfo_width()
+                if x2 > canvas_width - 5:
+                    # Shift tooltip left if it would go off-screen
+                    shift = x2 - (canvas_width - 5)
+                    x1 -= shift
+                    x2 -= shift
+                    self.canvas.coords(text_id, x1 + padding, y1 + padding)
+                
+                # Create background rectangle
+                bg_id = self.canvas.create_rectangle(
+                    x1, y1, x2, y2,
+                    fill="#FFFFDD",  # Light yellow background
+                    outline="#888888",  # Gray border
+                    width=1,
+                    tags=("tooltip", f"tooltip_bg_{category}")
+                )
+                
+                # Move background behind text
+                self.canvas.tag_lower(bg_id, text_id)
+                
+                # Store both IDs for cleanup
+                self.indicator_tooltips[category] = {
+                    'text': text_id,
+                    'bg': bg_id
+                }
+            else:
+                # Fallback if bbox fails
+                self.indicator_tooltips[category] = {'text': text_id}
     
-    def _on_indicator_leave(self, category):
-        """Remove hover effects and cleanup tooltip."""
-        self.canvas.configure(cursor="")
-        
-        # Remove tooltip if exists
+    def _cleanup_tooltip(self, category):
+        """Clean up any existing tooltip for a category."""
         if category in self.indicator_tooltips:
+            tooltip_info = self.indicator_tooltips[category]
             try:
-                self.canvas.delete(self.indicator_tooltips[category])
+                # Handle both single ID and dict with multiple IDs
+                if isinstance(tooltip_info, dict):
+                    for item_id in tooltip_info.values():
+                        self.canvas.delete(item_id)
+                else:
+                    self.canvas.delete(tooltip_info)
             except tk.TclError:
                 pass
             del self.indicator_tooltips[category]
+    
+    def _on_indicator_leave(self, category):
+        """Remove hover effects and cleanup tooltip."""
+        # Clear hover state
+        self.hover_states[category] = False
+        
+        self.canvas.configure(cursor="")
+        
+        # Remove tooltip if exists
+        self._cleanup_tooltip(category)
     
     def _get_category_article_count(self, category):
         """Get count of articles in a specific category."""

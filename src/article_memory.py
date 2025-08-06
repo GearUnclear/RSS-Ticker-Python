@@ -3,7 +3,7 @@ Article memory system for tracking displayed articles across sessions.
 """
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Set, Optional
 from pathlib import Path
 
@@ -27,6 +27,8 @@ class ArticleMemory:
         self.memory_file = Path(memory_file)
         self.retention_hours = retention_hours
         self.memory: Dict[str, datetime] = {}
+        self._dirty = False  # Track if memory needs saving
+        self._last_cleanup = datetime.now(timezone.utc)
         self._load_memory()
         
     def _load_memory(self):
@@ -39,11 +41,17 @@ class ArticleMemory:
             with open(self.memory_file, 'r') as f:
                 data = json.load(f)
                 
-            # Convert ISO timestamps back to datetime objects
+            # Convert ISO timestamps back to datetime objects (ensure UTC)
             self.memory = {}
             for url, timestamp_str in data.items():
                 try:
                     timestamp = datetime.fromisoformat(timestamp_str)
+                    # Ensure timezone awareness - assume UTC if naive
+                    if timestamp.tzinfo is None:
+                        timestamp = timestamp.replace(tzinfo=timezone.utc)
+                    # Convert to UTC if not already
+                    elif timestamp.tzinfo != timezone.utc:
+                        timestamp = timestamp.astimezone(timezone.utc)
                     self.memory[url] = timestamp
                 except ValueError:
                     logger.warning(f"Invalid timestamp for article {url}: {timestamp_str}")
@@ -71,7 +79,7 @@ class ArticleMemory:
             
     def _cleanup_old_entries(self):
         """Remove articles older than retention period."""
-        cutoff_time = datetime.now() - timedelta(hours=self.retention_hours)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.retention_hours)
         old_urls = [url for url, timestamp in self.memory.items() if timestamp < cutoff_time]
         
         for url in old_urls:
@@ -83,18 +91,30 @@ class ArticleMemory:
             
     def mark_article_shown(self, url: str):
         """Mark an article as having been shown."""
-        if url:  # Only track articles with valid URLs
-            self.memory[url] = datetime.now()
+        if not url:
+            logger.warning("Attempted to mark article with empty URL")
+            return
+            
+        self.memory[url] = datetime.now(timezone.utc)
+        self._dirty = True
+        logger.debug(f"Marked article as shown: {url}")
+    
+    def flush_memory(self):
+        """Save memory to disk if there are pending changes."""
+        if self._dirty:
             self._save_memory()
-            logger.debug(f"Marked article as shown: {url}")
+            self._dirty = False
             
     def was_recently_shown(self, url: str) -> bool:
         """Check if an article was recently shown."""
         if not url or url not in self.memory:
             return False
             
-        # Clean up old entries before checking
-        self._cleanup_old_entries()
+        # Periodic cleanup (every 10 minutes) instead of every check
+        now = datetime.now(timezone.utc)
+        if (now - self._last_cleanup).total_seconds() > 600:  # 10 minutes
+            self._cleanup_old_entries()
+            self._last_cleanup = now
         
         # Article is considered recently shown if it's still in memory
         return url in self.memory
@@ -140,7 +160,7 @@ class ArticleMemory:
             return False
             
         newest_time = max(self.memory.values())
-        hours_since = (datetime.now() - newest_time).total_seconds() / 3600
+        hours_since = (datetime.now(timezone.utc) - newest_time).total_seconds() / 3600
         
         if hours_since > hours_threshold:
             logger.warning(f"All articles older than {hours_threshold}h, resetting memory")

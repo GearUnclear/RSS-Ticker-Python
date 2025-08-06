@@ -485,10 +485,10 @@ class FeedFetcher:
             else:  # Older but unseen in this session
                 base_score = NEW_ARTICLE_PRIORITY * 0.7
                 
-            # Penalty for articles shown in previous sessions
+            # Light penalty for articles shown in previous sessions (new in current session)
             if recently_shown_globally:
-                base_score *= 0.3  # Significant penalty but not zero
-                logger.debug(f"Article {url[:50]}... penalized for recent global display")
+                base_score *= 0.7  # Light penalty - 30% reduction for cross-session articles
+                logger.debug(f"New article {url[:50]}... lightly penalized for recent global display")
                 
             return base_score
         
@@ -510,10 +510,10 @@ class FeedFetcher:
         hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
         age_penalty = min(hours_since_fetch / PRIORITY_DECAY_HOURS, 1) * 15
         
-        # Additional penalty for globally recent articles
+        # Heavy penalty for globally recent articles that were also shown in current session
         final_priority = max(base_priority - age_penalty, 10)  # Minimum priority of 10
         if recently_shown_globally:
-            final_priority *= 0.5  # Half priority for globally recent articles
+            final_priority *= 0.3  # Heavy penalty - 70% reduction for repeatedly shown articles
             
         return final_priority
     
@@ -644,6 +644,7 @@ class FeedFetcher:
         
         # Update display metadata for selected articles
         self.display_cycle_count += 1
+        marked_urls = 0
         for article in selected_articles:
             article['display_count'] += 1
             article['last_displayed_cycle'] = self.display_cycle_count
@@ -652,6 +653,13 @@ class FeedFetcher:
             url = article.get('url', '')
             if url:
                 self.article_memory.mark_article_shown(url)
+                marked_urls += 1
+            else:
+                logger.warning(f"Article missing URL: {article.get('display_text', '')[:50]}...")
+        
+        # Batch save all marked articles
+        self.article_memory.flush_memory()
+        logger.debug(f"Flushed {marked_urls} articles to persistent memory")
         
         # Convert back to tuple format
         result = [(article['display_text'], article['url'], article['description'], article.get('category', 'Default')) 
