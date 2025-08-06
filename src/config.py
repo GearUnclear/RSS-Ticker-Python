@@ -162,6 +162,14 @@ CLOSE_ICON = "✕"
 TASKBAR_HEIGHT = 40          # Estimated taskbar height
 TOPMOST_CHECK_INTERVAL = 30000  # Check window on top every 30 seconds
 
+# Category Indicator Settings (Apple-style)
+INDICATOR_SIZE = 8           # Dot diameter in pixels
+INDICATOR_SPACING = 3        # Space between dots
+INDICATOR_MARGIN_X = 10      # Distance from left edge
+INDICATOR_MARGIN_Y = 8       # Distance from top edge
+INDICATOR_HOVER_SCALE = 1.2  # Scale factor on hover
+INDICATOR_ANIMATION_MS = 200 # Fade animation duration
+
 # ============================================================================
 # ERROR HANDLING
 # ============================================================================

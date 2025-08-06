@@ -16,7 +16,9 @@ try:
         TICKER_HEIGHT_PX, BG_COLOR, FG_COLOR, FONT_FAMILY, FONT_SIZE,
         SCROLL_DELAY_MS, PIXELS_PER_STEP, MIN_HEADLINE_GAP, BULLET,
         PAUSE_ICON, CLOSE_ICON, FONT_SIZE_PAUSE, FONT_SIZE_CLOSE,
-        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS
+        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS,
+        INDICATOR_SIZE, INDICATOR_SPACING, INDICATOR_MARGIN_X, INDICATOR_MARGIN_Y,
+        INDICATOR_HOVER_SCALE, INDICATOR_ANIMATION_MS
     )
     from .exceptions import InvalidURLError
     from .logger import logger
@@ -27,7 +29,9 @@ except ImportError:
         TICKER_HEIGHT_PX, BG_COLOR, FG_COLOR, FONT_FAMILY, FONT_SIZE,
         SCROLL_DELAY_MS, PIXELS_PER_STEP, MIN_HEADLINE_GAP, BULLET,
         PAUSE_ICON, CLOSE_ICON, FONT_SIZE_PAUSE, FONT_SIZE_CLOSE,
-        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS
+        TASKBAR_HEIGHT, TOPMOST_CHECK_INTERVAL, CATEGORY_COLORS,
+        INDICATOR_SIZE, INDICATOR_SPACING, INDICATOR_MARGIN_X, INDICATOR_MARGIN_Y,
+        INDICATOR_HOVER_SCALE, INDICATOR_ANIMATION_MS
     )
     from exceptions import InvalidURLError
     from logger import logger
@@ -56,6 +60,11 @@ class TickerGUI:
         # Category filtering
         self.enabled_categories = {'Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion', 'Default'}
         self.category_vars = {}  # Will hold tkinter BooleanVar instances
+        
+        # Apple-style category indicators
+        self.category_indicators = {}  # Canvas items for dots
+        self.indicator_tooltips = {}   # Tooltip tracking
+        self.main_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage']  # Primary categories to show
         
         # Dynamic height based on description setting
         self.base_height = TICKER_HEIGHT_PX
@@ -167,6 +176,9 @@ class TickerGUI:
         self.canvas.bind("<Button-1>", self.open_link)
 
         self.canvas.tag_bind("close_btn", "<Button-1>", lambda e: self.close_app())
+        
+        # Setup Apple-style category indicators
+        self._setup_category_indicators()
         
         # Create context menu with submenus
         self.context_menu = Menu(self.root, tearoff=0)
@@ -484,15 +496,149 @@ class TickerGUI:
         except tk.TclError:
             pass
             
+    def _setup_category_indicators(self):
+        """Setup Apple-style category indicator dots."""
+        x = INDICATOR_MARGIN_X
+        y = INDICATOR_MARGIN_Y
+        
+        for i, category in enumerate(self.main_categories):
+            # Calculate position
+            dot_x = x + i * (INDICATOR_SIZE + INDICATOR_SPACING)
+            dot_y = y
+            
+            # Get category color
+            color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
+            
+            # Create indicator dot
+            is_enabled = category in self.enabled_categories
+            dot_id = self._create_indicator_dot(dot_x, dot_y, color, is_enabled, category)
+            
+            self.category_indicators[category] = {
+                'dot_id': dot_id,
+                'x': dot_x,
+                'y': dot_y,
+                'color': color,
+                'enabled': is_enabled
+            }
+    
+    def _create_indicator_dot(self, x, y, color, filled, category):
+        """Create a single indicator dot with Apple-style design."""
+        radius = INDICATOR_SIZE // 2
+        
+        if filled:
+            # Filled circle for enabled categories
+            dot_id = self.canvas.create_oval(
+                x - radius, y - radius, x + radius, y + radius,
+                fill=color, outline=color, width=1,
+                tags=("category_indicator", f"indicator_{category}")
+            )
+        else:
+            # Hollow circle for disabled categories
+            dot_id = self.canvas.create_oval(
+                x - radius, y - radius, x + radius, y + radius,
+                fill="", outline=color, width=2,
+                tags=("category_indicator", f"indicator_{category}")
+            )
+        
+        # Bind click and hover events
+        self.canvas.tag_bind(f"indicator_{category}", "<Button-1>", 
+                           lambda e, c=category: self._on_indicator_click(c))
+        self.canvas.tag_bind(f"indicator_{category}", "<Enter>", 
+                           lambda e, c=category: self._on_indicator_hover(c))
+        self.canvas.tag_bind(f"indicator_{category}", "<Leave>", 
+                           lambda e, c=category: self._on_indicator_leave(c))
+        
+        return dot_id
+    
+    def _update_category_indicators(self):
+        """Update indicator visual states based on enabled categories."""
+        for category, indicator_info in self.category_indicators.items():
+            is_enabled = category in self.enabled_categories
+            if indicator_info['enabled'] != is_enabled:
+                # State changed, update visual
+                indicator_info['enabled'] = is_enabled
+                self._update_indicator_visual(category, is_enabled)
+    
+    def _update_indicator_visual(self, category, enabled):
+        """Update a single indicator's visual state with smooth transition."""
+        if category not in self.category_indicators:
+            return
+            
+        info = self.category_indicators[category]
+        dot_id = info['dot_id']
+        color = info['color']
+        
+        if enabled:
+            # Fill the circle
+            self.canvas.itemconfig(dot_id, fill=color, outline=color, width=1)
+        else:
+            # Make it hollow
+            self.canvas.itemconfig(dot_id, fill="", outline=color, width=2)
+    
+    def _on_indicator_click(self, category):
+        """Handle click on category indicator for instant toggling."""
+        # Toggle the category state
+        if category in self.enabled_categories:
+            self.enabled_categories.discard(category)
+            if category in self.category_vars:
+                self.category_vars[category].set(False)
+        else:
+            self.enabled_categories.add(category)
+            if category in self.category_vars:
+                self.category_vars[category].set(True)
+        
+        # Update visual immediately
+        self._update_category_indicators()
+        
+        # Apply filter gracefully
+        self._filter_current_headlines_gracefully()
+        
+        logger.info(f"Category {category} toggled via indicator: {'enabled' if category in self.enabled_categories else 'disabled'}")
+    
+    def _on_indicator_hover(self, category):
+        """Show tooltip and subtle hover effect on indicator."""
+        # Get article count for this category
+        count = self._get_category_article_count(category)
+        status = "enabled" if category in self.enabled_categories else "disabled"
+        
+        # Simple hover effect - slight scale (would need more complex implementation for actual scaling)
+        # For now, just change cursor
+        self.canvas.configure(cursor="hand2")
+        
+        logger.debug(f"Hovering {category}: {count} articles, {status}")
+    
+    def _on_indicator_leave(self, category):
+        """Remove hover effects."""
+        self.canvas.configure(cursor="")
+    
+    def _get_category_article_count(self, category):
+        """Get count of articles in a specific category."""
+        if not hasattr(self, 'all_headlines'):
+            return 0
+            
+        count = 0
+        for item in self.all_headlines:
+            if len(item) >= 4 and item[3] == category:
+                count += 1
+        return count
+    
     def _setup_category_menu(self):
-        """Setup category checkboxes in the context menu."""
+        """Setup category checkboxes in the context menu with article counts."""
         available_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion']
         
         for category in available_categories:
             var = tk.BooleanVar(value=category in self.enabled_categories)
             self.category_vars[category] = var
+            
+            # Get article count
+            count = self._get_category_article_count(category)
+            
+            # Create menu item with count and visual indicator
+            enabled_indicator = "●" if category in self.enabled_categories else "○"
+            label = f"{enabled_indicator} {category} ({count} articles)"
+            
             self.categories_menu.add_checkbutton(
-                label=category,
+                label=label,
                 variable=var,
                 command=lambda c=category: self.toggle_category(c)
             )
@@ -508,7 +654,7 @@ class TickerGUI:
         logger.info("Speed set to double (2x)")
     
     def toggle_category(self, category: str):
-        """Toggle visibility of a specific category."""
+        """Toggle visibility of a specific category with graceful UX."""
         if self.category_vars[category].get():
             self.enabled_categories.add(category)
             logger.info(f"Enabled category: {category}")
@@ -516,14 +662,48 @@ class TickerGUI:
             self.enabled_categories.discard(category)
             logger.info(f"Disabled category: {category}")
         
-        # Filter current headlines
-        self._filter_current_headlines()
+        # Update indicators immediately
+        self._update_category_indicators()
+        
+        # Refresh menu labels with new counts
+        self._refresh_category_menu()
+        
+        # Apply graceful filtering
+        self._filter_current_headlines_gracefully()
     
-    def _filter_current_headlines(self):
-        """Filter current headlines based on enabled categories."""
+    def _refresh_category_menu(self):
+        """Refresh category menu labels with updated article counts."""
+        # Clear existing menu items
+        self.categories_menu.delete(0, "end")
+        
+        # Recreate with updated counts
+        available_categories = ['Politics', 'Technology', 'Business', 'World', 'HomePage', 'Science', 'Sports', 'Arts', 'Health', 'Opinion']
+        
+        for category in available_categories:
+            if category not in self.category_vars:
+                continue
+                
+            var = self.category_vars[category]
+            count = self._get_category_article_count(category)
+            
+            # Visual indicator and label
+            enabled_indicator = "●" if category in self.enabled_categories else "○"
+            label = f"{enabled_indicator} {category} ({count})"
+            
+            self.categories_menu.add_checkbutton(
+                label=label,
+                variable=var,
+                command=lambda c=category: self.toggle_category(c)
+            )
+    
+    def _filter_current_headlines_gracefully(self):
+        """Apple-style graceful filtering - never disrupt current viewing experience."""
         if not hasattr(self, 'all_headlines'):
             return
             
+        # CRITICAL: Never touch self.text_items (currently scrolling articles)
+        # Only filter upcoming articles in self.headlines
+        
         # Filter headlines by enabled categories
         filtered_headlines = []
         for item in self.all_headlines:
@@ -531,14 +711,63 @@ class TickerGUI:
                 category = item[3]
                 if category in self.enabled_categories:
                     filtered_headlines.append(item)
-            else:  # Fallback for items without category
+            else:  # Fallback for items without category (always show)
                 filtered_headlines.append(item)
         
-        # Update headlines deque
+        # Handle empty state elegantly (Apple-style)
+        if not filtered_headlines and self.enabled_categories:
+            # Some categories enabled but no articles - temporary state
+            empty_message = "No articles in selected categories • Loading fresh content..."
+            empty_desc = "New articles will appear shortly. You can adjust categories anytime by right-clicking."
+            filtered_headlines = [(empty_message, "", empty_desc, "Default")]
+        elif not filtered_headlines:
+            # No categories enabled - helpful guidance
+            guidance_message = "Choose categories above • Right-click to select"
+            guidance_desc = "Select news categories from the right-click menu to see articles."
+            filtered_headlines = [(guidance_message, "", guidance_desc, "Default")]
+        
+        # Update headlines queue gracefully
         self.headlines.clear()
         self.headlines.extend(filtered_headlines)
         
-        logger.info(f"Filtered headlines: {len(filtered_headlines)} visible from {len(self.all_headlines)} total")
+        # Safe index management - only reset if needed
+        if self.current_index >= len(self.headlines):
+            self.current_index = 0
+        
+        # Handle description context intelligently
+        self._manage_description_context()
+        
+        logger.info(f"Gracefully filtered: {len(filtered_headlines)} visible from {len(self.all_headlines) if hasattr(self, 'all_headlines') else 0} total")
+    
+    def _manage_description_context(self):
+        """Intelligently manage description display during category changes."""
+        if not self.show_descriptions or not self.description_text_id:
+            return
+            
+        # Find what's currently at the reference point
+        current_item = self.find_current_headline()
+        
+        if current_item:
+            current_category = current_item.get('category', 'Default')
+            # Only clear description if its category was disabled AND no enabled content is visible
+            if current_category not in self.enabled_categories:
+                # Check if any enabled articles are coming up
+                has_enabled_upcoming = any(
+                    item.get('category', 'Default') in self.enabled_categories 
+                    for item in self.text_items[1:] if len(self.text_items) > 1
+                )
+                
+                if not has_enabled_upcoming:
+                    # Gracefully fade out the description
+                    try:
+                        self.canvas.delete(self.description_text_id)
+                        self.description_text_id = None
+                    except tk.TclError:
+                        pass
+    
+    def _filter_current_headlines(self):
+        """Legacy method - redirect to graceful version."""
+        self._filter_current_headlines_gracefully()
     
     def toggle_descriptions(self):
         """Toggle the display of descriptions."""
