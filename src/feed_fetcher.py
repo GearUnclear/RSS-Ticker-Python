@@ -485,10 +485,10 @@ class FeedFetcher:
         now = datetime.now()
         url = article.get('url', '')
         
-        # Check if article was recently shown in previous sessions
-        recently_shown_globally = self.article_memory.was_recently_shown(url)
+        # Get enhanced penalty factor from improved cross-session tracking
+        cross_session_penalty = self.article_memory.get_article_penalty_factor(url)
         
-        # New article gets maximum priority, but penalized if shown recently in another session
+        # New article gets maximum priority, adjusted by cross-session penalty
         if article['display_count'] == 0:
             hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
             
@@ -499,12 +499,15 @@ class FeedFetcher:
             else:  # Older but unseen in this session
                 base_score = NEW_ARTICLE_PRIORITY * 0.7
                 
-            # Light penalty for articles shown in previous sessions (new in current session)
-            if recently_shown_globally:
-                base_score *= 0.7  # Light penalty - 30% reduction for cross-session articles
-                logger.debug(f"New article {url[:50]}... lightly penalized for recent global display")
+            # Apply graduated cross-session penalty (can be bonus too)
+            final_score = base_score * cross_session_penalty
+            
+            if cross_session_penalty < 1.0:
+                logger.debug(f"Article {url[:50]}... cross-session penalty: {cross_session_penalty:.2f}")
+            elif cross_session_penalty > 1.0:
+                logger.debug(f"Article {url[:50]}... cross-session bonus: {cross_session_penalty:.2f}")
                 
-            return base_score
+            return final_score
         
         # Determine effective cooldown period (adaptive mode reduces it)
         effective_cooldown = MIN_COOLDOWN_CYCLES
@@ -524,10 +527,12 @@ class FeedFetcher:
         hours_since_fetch = (now - article['first_seen']).total_seconds() / 3600
         age_penalty = min(hours_since_fetch / PRIORITY_DECAY_HOURS, 1) * 15
         
-        # Heavy penalty for globally recent articles that were also shown in current session
-        final_priority = max(base_priority - age_penalty, 10)  # Minimum priority of 10
-        if recently_shown_globally:
-            final_priority *= 0.3  # Heavy penalty - 70% reduction for repeatedly shown articles
+        # Apply cross-session penalty to recycled articles too
+        base_recycled_priority = max(base_priority - age_penalty, 10)  # Minimum priority of 10
+        final_priority = base_recycled_priority * cross_session_penalty
+        
+        if cross_session_penalty < 1.0:
+            logger.debug(f"Recycled article {url[:50]}... cross-session penalty: {cross_session_penalty:.2f}")
             
         return final_priority
     
@@ -691,10 +696,13 @@ class FeedFetcher:
         logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count}, adaptive={adaptive_mode})")
         logger.debug(f"Available for selection: {len(scored_articles)}, High priority: {len([x for x in scored_articles if x[1] >= 60])}")
         
-        # Log memory stats periodically
+        # Log enhanced memory stats periodically
         if self.display_cycle_count % 10 == 0:
             memory_stats = self.article_memory.get_memory_stats()
-            logger.info(f"Article memory stats: {memory_stats}")
+            logger.info(f"Enhanced memory stats: {memory_stats['total_articles']} articles, "
+                       f"Age: {memory_stats['age_buckets']}, "
+                       f"Freq: {memory_stats['frequency_distribution']}, "
+                       f"Avg: {memory_stats['avg_frequency']}")
         
         return result
     
