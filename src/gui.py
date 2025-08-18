@@ -169,16 +169,6 @@ class TickerGUI:
             state="hidden"
         )
         
-        # Close button
-        close_x = self.screen_width - 20
-        self.canvas.create_text(
-            close_x, 5,
-            text=CLOSE_ICON,
-            font=(FONT_FAMILY, FONT_SIZE_CLOSE),
-            fill=FG_COLOR,
-            anchor="ne",
-            tags="close_btn"
-        )
         
         # Bind events
         self.root.bind("<Escape>", lambda e: self.close_app())
@@ -186,7 +176,6 @@ class TickerGUI:
         self.root.bind("<space>", lambda e: self.toggle_pause())
         self.canvas.bind("<Button-1>", self.open_link)
 
-        self.canvas.tag_bind("close_btn", "<Button-1>", lambda e: self.close_app())
         
         # Setup Apple-style category indicators
         self._setup_category_indicators()
@@ -217,6 +206,9 @@ class TickerGUI:
         self.categories_menu = Menu(self.context_menu, tearoff=0)
         self._setup_category_menu()
         self.context_menu.add_cascade(label="Categories", menu=self.categories_menu)
+        
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="Exit", command=self.close_app)
         
         # Keep window on top periodically
         self.maintain_topmost()
