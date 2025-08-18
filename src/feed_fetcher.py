@@ -219,6 +219,10 @@ class FeedFetcher:
         if 'techcrunch.com' in feed_url or 'wired.com' in feed_url:
             return 'Technology'
             
+        # Check for external politics feeds
+        if 'politico.com' in feed_url:
+            return 'Politics'
+            
         # Extract category from NYT URL pattern
         match = re.search(r'/rss/nyt/([^/.]+)\.xml', feed_url)
         if match:

@@ -20,6 +20,7 @@ from pathlib import Path
 FEED_URLS = [
     # CURRENTLY ACTIVE FEEDS:
     "https://rss.nytimes.com/services/xml/rss/nyt/Politics.xml",
+    "https://rss.politico.com/politics-news.xml",  # POLITICO - Politics News
     "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
     
     # MAIN SECTIONS - Uncomment any you want to add:

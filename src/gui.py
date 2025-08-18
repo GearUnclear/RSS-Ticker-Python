@@ -634,6 +634,8 @@ class TickerGUI:
         for feed_url in FEED_URLS:
             if 'techcrunch.com' in feed_url or 'wired.com' in feed_url:
                 active_categories.add('Technology')
+            elif 'politico.com' in feed_url:
+                active_categories.add('Politics')
             elif '/Politics.xml' in feed_url:
                 active_categories.add('Politics')
             elif '/HomePage.xml' in feed_url:
@@ -1278,14 +1280,55 @@ class TickerGUI:
             
         return expanded_headlines
     
+    def _get_dynamic_sliding_window_size(self):
+        """Calculate dynamic sliding window size based on content availability."""
+        enabled_count = len(self.enabled_categories)
+        total_articles = len(self.headlines)
+        
+        # Count articles in enabled categories
+        enabled_articles = 0
+        for item in self.headlines:
+            if len(item) >= 4:
+                text, url, description, category = item
+            else:
+                text, url, description = item
+                category = 'Default'
+            if category in self.enabled_categories:
+                enabled_articles += 1
+        
+        # Dynamic window sizing based on content availability
+        if enabled_count == 1 and enabled_articles < 30:
+            # Single category with limited content
+            return min(10, enabled_articles // 3)
+        elif enabled_count <= 2:
+            # Few categories enabled
+            return min(25, enabled_articles // 2)
+        else:
+            # Multiple categories - use larger window
+            return min(50, enabled_articles)
+    
     def _select_best_available_article(self):
-        """Select best article using time-decay scoring."""
+        """
+        Select best article using 4-tier priority system.
+        
+        Tier 1: Fresh articles (never shown) from enabled categories - HIGHEST PRIORITY
+        Tier 2: Articles outside sliding window from enabled categories 
+        Tier 3: Articles in sliding window but past cooldown period
+        Tier 4: EMERGENCY - Any article from enabled categories (ignore all constraints)
+        """
         if not self.headlines:
             return None
             
         current_time = time.time()
-        best_score = -1
-        best_article = None
+        dynamic_window_size = self._get_dynamic_sliding_window_size()
+        
+        # Get recently shown articles for dynamic window
+        recent_urls = set(list(self.sliding_window_shown)[-dynamic_window_size:])
+        
+        tier1_candidates = []  # Fresh articles
+        tier2_candidates = []  # Outside sliding window
+        tier3_candidates = []  # In window but past cooldown
+        tier4_candidates = []  # Emergency fallback
         
         for item in self.headlines:
             if len(item) >= 4:
@@ -1297,27 +1340,59 @@ class TickerGUI:
             # Skip if category is disabled
             if category not in self.enabled_categories:
                 continue
-                
-            # Calculate time-decay score
+            
             last_shown = self.last_article_time.get(url, 0)
             time_since_shown = current_time - last_shown
+            in_recent_window = url in recent_urls
             
-            # Base score from time decay (more time = higher score)
-            time_score = min(time_since_shown / 300, 10)  # Max 10 points after 5 minutes
-            
-            # Bonus for never-shown articles
+            # Calculate base score for ranking within tiers
+            time_score = min(time_since_shown / 300, 10)
             novelty_bonus = 20 if last_shown == 0 else 0
+            base_score = time_score + novelty_bonus
             
-            # Penalty if in sliding window (recently shown)
-            recent_penalty = -100 if url in self.sliding_window_shown else 0
+            # Categorize into tiers
+            if last_shown == 0:
+                # Tier 1: Fresh articles (never shown)
+                tier1_candidates.append((base_score, item))
+            elif not in_recent_window:
+                # Tier 2: Outside sliding window
+                tier2_candidates.append((base_score, item))
+            elif time_since_shown >= 30:  # 30 second cooldown
+                # Tier 3: In window but past cooldown
+                tier3_candidates.append((base_score, item))
             
-            total_score = time_score + novelty_bonus + recent_penalty
+            # All enabled articles are emergency candidates
+            tier4_candidates.append((base_score, item))
+        
+        # Select from highest available tier
+        candidates = None
+        tier_used = 0
+        
+        if tier1_candidates:
+            candidates = tier1_candidates
+            tier_used = 1
+        elif tier2_candidates:
+            candidates = tier2_candidates  
+            tier_used = 2
+        elif tier3_candidates:
+            candidates = tier3_candidates
+            tier_used = 3
+        elif tier4_candidates:
+            candidates = tier4_candidates
+            tier_used = 4
+        
+        if candidates:
+            # Sort by score descending and return best
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            best_article = candidates[0][1]
             
-            if total_score > best_score:
-                best_score = total_score
-                best_article = item
-                
-        return best_article
+            # Log tier usage for debugging
+            if tier_used >= 3:
+                logger.debug(f"Article selection using Tier {tier_used} (window size: {dynamic_window_size})")
+            
+            return best_article
+        
+        return None
     
     def _check_article_supply(self):
         """Check if we need to request fresh articles."""
