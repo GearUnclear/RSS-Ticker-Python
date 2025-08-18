@@ -389,7 +389,7 @@ class TickerGUI:
             else:
                 display_text = text
             
-            logger.debug(f"Loading item {idx}: {text[:50]}... (category: {category}, color: {text_color})")
+            logger.debug(f"Loading item: {text[:50]}... (category: {category}, color: {text_color})")
             
             # Create new text item with category color
             text_id = self.canvas.create_text(
