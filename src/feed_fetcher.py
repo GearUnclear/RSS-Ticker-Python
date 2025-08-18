@@ -611,12 +611,14 @@ class FeedFetcher:
             # Last resort: reset display counts to allow immediate re-display
             if len(self.article_pool) > 0:
                 logger.warning("CRITICAL: Resetting article display counts to prevent empty ticker")
+                # Reset only half of the oldest articles to spread out recycling
+                reset_count = min(DISPLAY_SUBSET_SIZE // 2, len(self.article_pool))
                 oldest_articles = sorted(self.article_pool, 
-                                        key=lambda x: x['last_displayed_cycle'])[:DISPLAY_SUBSET_SIZE]
+                                        key=lambda x: x['last_displayed_cycle'])[:reset_count]
                 for article in oldest_articles:
-                    article['last_displayed_cycle'] = 0  # Reset to allow immediate display
-                    scored_articles.append((article, 50))  # Give medium priority
-                logger.info(f"Reset {len(scored_articles)} oldest articles for emergency display")
+                    article['last_displayed_cycle'] = max(0, self.display_cycle_count - 3)  # 3 cycles ago
+                    scored_articles.append((article, 30))  # Lower priority to mix better
+                logger.info(f"Reset {len(oldest_articles)} oldest articles for emergency display")
             
             if not scored_articles:
                 return []  # Truly no articles available

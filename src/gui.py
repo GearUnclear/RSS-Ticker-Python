@@ -1297,12 +1297,12 @@ class TickerGUI:
                 enabled_articles += 1
         
         # Dynamic window sizing based on content availability
-        if enabled_count == 1 and enabled_articles < 30:
-            # Single category with limited content
-            return min(10, enabled_articles // 3)
+        if enabled_count == 1 and enabled_articles < 50:
+            # Single category with limited content - use smaller window to allow faster recycling
+            return min(25, max(8, enabled_articles // 2))
         elif enabled_count <= 2:
             # Few categories enabled
-            return min(25, enabled_articles // 2)
+            return min(35, enabled_articles // 2)
         else:
             # Multiple categories - use larger window
             return min(50, enabled_articles)
@@ -1357,7 +1357,7 @@ class TickerGUI:
             elif not in_recent_window:
                 # Tier 2: Outside sliding window
                 tier2_candidates.append((base_score, item))
-            elif time_since_shown >= 30:  # 30 second cooldown
+            elif time_since_shown >= 120:  # 2 minute cooldown for better variety
                 # Tier 3: In window but past cooldown
                 tier3_candidates.append((base_score, item))
             
