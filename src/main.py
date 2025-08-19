@@ -36,8 +36,8 @@ def main():
     fetcher = FeedFetcher(update_queue)
     fetcher.start()
     
-    # Create GUI
-    gui = TickerGUI(update_queue)
+    # Create GUI with fetcher reference for bidirectional communication
+    gui = TickerGUI(update_queue, fetcher)
     
     # Register fetcher stop as shutdown callback
     gui.add_shutdown_callback(fetcher.stop)

@@ -48,7 +48,8 @@ class FeedFetcher:
     """Handles RSS feed fetching with proper error handling and SSL verification."""
     
     def __init__(self, update_queue: queue.Queue):
-        self.update_queue = update_queue
+        self.update_queue = update_queue  # For sending updates to GUI
+        self.request_queue = queue.Queue()  # For receiving requests from GUI
         self.consecutive_errors = 0
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -379,7 +380,7 @@ class FeedFetcher:
         return result
             
     def _fetch_loop(self):
-        """Main fetch loop that runs in background thread."""
+        """Main fetch loop that runs in background thread with intelligent refresh."""
         logger.info("Feed fetch loop started")
         
         # Fetch immediately on startup
@@ -387,6 +388,9 @@ class FeedFetcher:
         
         while not self._stop_event.is_set():
             try:
+                # Check for GUI refresh requests before fetching
+                refresh_requested = self._check_gui_requests()
+                
                 # Fetch and parse all feeds
                 new_items = self._fetch_all_feeds()
                 
@@ -397,22 +401,20 @@ class FeedFetcher:
                     # Select articles for display with breaking news bias
                     display_items = self._select_articles_for_display()
                     
-                    # Send ALL articles to GUI, let GUI select dynamically
+                    # Send category-balanced articles to GUI
                     if display_items:
-                        # Send larger batch for GUI to choose from
-                        all_available = self._get_all_available_articles()
-                        random.shuffle(all_available)
-                        self.update_queue.put(('update', all_available[:100]))  # Send up to 100 articles
-                        logger.info(f"Sent {len(all_available[:100])} available articles to GUI")
+                        # Get balanced batch optimized for current GUI needs
+                        balanced_batch = self._get_category_balanced_articles()
+                        self.update_queue.put(('update', balanced_batch))
+                        logger.info(f"Sent {len(balanced_batch)} category-balanced articles to GUI")
                     else:
                         self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "", "Default")]))
                 else:
                     # Send available articles from existing pool
-                    all_available = self._get_all_available_articles()
-                    if all_available:
-                        random.shuffle(all_available)
-                        self.update_queue.put(('update', all_available[:100]))
-                        logger.info(f"Sent {len(all_available[:100])} pooled articles to GUI")
+                    balanced_batch = self._get_category_balanced_articles()
+                    if balanced_batch:
+                        self.update_queue.put(('update', balanced_batch))
+                        logger.info(f"Sent {len(balanced_batch)} balanced pooled articles to GUI")
                     else:
                         self.update_queue.put(('update', [(f"(No headlines available){BULLET}", "", "", "Default")]))
                     
@@ -426,21 +428,76 @@ class FeedFetcher:
                 logger.exception("Unexpected error in fetch loop")
                 self._handle_error(e)
                 
-            # Calculate sleep time
+            # Calculate adaptive sleep time based on refresh requests
             if initial_fetch:
                 # After initial fetch, wait the normal interval
                 initial_fetch = False
                 sleep_time = REFRESH_MINUTES * 60
             else:
-                sleep_time = self._calculate_sleep_time()
+                sleep_time = self._calculate_adaptive_sleep_time(refresh_requested)
             
-            # Sleep with periodic checks for stop event
+            # Sleep with periodic checks for stop event and high-priority requests
             elapsed = 0
             while elapsed < sleep_time and not self._stop_event.is_set():
+                # Check for critical refresh requests more frequently during sleep
+                if elapsed % 5 == 0:  # Every 5 seconds
+                    critical_request = self._check_gui_requests()
+                    if critical_request:
+                        logger.info("Critical refresh request received during sleep - breaking early")
+                        break
+                        
                 time.sleep(1)
                 elapsed += 1
                 
         logger.info("Feed fetch loop stopped")
+    
+    def _check_gui_requests(self) -> bool:
+        """Check for refresh requests from GUI and return if refresh was requested."""
+        refresh_requested = False
+        
+        # Check for pending GUI messages (non-blocking)
+        try:
+            while True:
+                try:
+                    # Try to get a message from request queue without blocking
+                    msg_type, data = self.request_queue.get_nowait()
+                    
+                    if msg_type == 'refresh_request':
+                        priority = data.get('priority', 'normal')
+                        reason = data.get('reason', 'unknown')
+                        categories = data.get('categories', [])
+                        
+                        logger.info(f"Refresh request received: {priority} priority, reason: {reason}")
+                        if categories:
+                            logger.debug(f"Requested categories: {categories}")
+                        
+                        refresh_requested = True
+                        
+                        # For critical requests, fetch immediately
+                        if priority == 'critical':
+                            logger.warning("Critical refresh request - forcing immediate fetch")
+                            return True
+                            
+                except queue.Empty:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error checking GUI requests: {e}")
+            
+        return refresh_requested
+    
+    def request_refresh(self, priority: str = 'normal', reason: str = 'manual', categories: List[str] = None):
+        """Public method for GUI to request refresh."""
+        try:
+            request_data = {
+                'priority': priority,  # 'critical', 'high', 'normal', 'low'
+                'reason': reason,
+                'categories': categories or []
+            }
+            self.request_queue.put(('refresh_request', request_data))
+            logger.debug(f"Refresh request queued: {priority} priority")
+        except Exception as e:
+            logger.error(f"Failed to queue refresh request: {e}")
         
     def _handle_error(self, error: Exception):
         """Handle errors during fetching."""
@@ -470,6 +527,51 @@ class FeedFetcher:
             logger.debug(f"Sleeping {sleep_sec}s until next refresh")
             
         return sleep_sec
+    
+    def _calculate_adaptive_sleep_time(self, refresh_requested: bool = False) -> int:
+        """Calculate adaptive sleep time based on content demand and errors."""
+        base_sleep = self._calculate_sleep_time()
+        
+        # If errors occurred, use standard backoff
+        if self.consecutive_errors > 0:
+            return base_sleep
+            
+        # Check recent refresh request patterns
+        recent_requests = self._analyze_recent_requests()
+        
+        # Adaptive timing based on content demand
+        if recent_requests['critical_count'] > 2:
+            # High demand - reduce refresh interval significantly
+            adaptive_sleep = max(30, base_sleep // 4)  # Down to 30 seconds minimum
+            logger.info(f"High demand detected - accelerated refresh: {adaptive_sleep}s")
+        elif recent_requests['high_count'] > 1:
+            # Medium demand - moderate reduction
+            adaptive_sleep = max(60, base_sleep // 2)  # Down to 1 minute minimum
+            logger.info(f"Medium demand detected - faster refresh: {adaptive_sleep}s")
+        elif refresh_requested:
+            # Some demand - slight reduction
+            adaptive_sleep = max(90, base_sleep * 3 // 4)  # Down to 1.5 minutes
+            logger.debug(f"Refresh requested - slightly faster: {adaptive_sleep}s")
+        elif recent_requests['total_count'] == 0:
+            # No recent demand - can extend refresh interval
+            adaptive_sleep = min(300, base_sleep * 2)  # Up to 5 minutes maximum
+            logger.debug(f"Low demand - extended refresh: {adaptive_sleep}s")
+        else:
+            # Normal demand - standard timing
+            adaptive_sleep = base_sleep
+            
+        return adaptive_sleep
+    
+    def _analyze_recent_requests(self) -> dict:
+        """Analyze recent refresh request patterns."""
+        # This would ideally track request history, but for now return mock data
+        # In a real implementation, we'd track timestamps and priorities of recent requests
+        return {
+            'critical_count': 0,
+            'high_count': 0,
+            'normal_count': 0,
+            'total_count': 0
+        }
     
     def _calculate_priority_score(self, article: Dict, adaptive_mode: bool = False) -> float:
         """
@@ -766,6 +868,80 @@ class FeedFetcher:
                 
             logger.debug(f"Retrieved {len(all_articles)} articles from pool")
             return all_articles
+    
+    def _get_category_balanced_articles(self, target_size: int = 100) -> List[Tuple[str, str, str, str]]:
+        """Get a category-balanced batch of articles optimized for variety."""
+        with self.article_pool_lock:
+            if not self.article_pool:
+                return []
+                
+            # Group articles by category
+            category_groups = {}
+            for article in self.article_pool:
+                category = article.get('category', 'Default')
+                if category not in category_groups:
+                    category_groups[category] = []
+                category_groups[category].append(article)
+            
+            # Sort articles in each category by priority score
+            for category, articles in category_groups.items():
+                scored_articles = []
+                for article in articles:
+                    score = self._calculate_priority_score(article, adaptive_mode=False)
+                    scored_articles.append((score, article))
+                
+                # Sort by score descending and keep only articles
+                scored_articles.sort(key=lambda x: x[0], reverse=True)
+                category_groups[category] = [article for score, article in scored_articles]
+            
+            # Calculate balanced distribution
+            num_categories = len(category_groups)
+            if num_categories == 0:
+                return []
+                
+            # Base allocation per category with minimum guarantee
+            base_per_category = max(5, target_size // num_categories)
+            remaining_slots = target_size - (base_per_category * num_categories)
+            
+            balanced_batch = []
+            category_allocations = {cat: base_per_category for cat in category_groups.keys()}
+            
+            # Distribute remaining slots to categories with most available articles
+            available_counts = [(len(articles), cat) for cat, articles in category_groups.items()]
+            available_counts.sort(reverse=True)
+            
+            for i, (count, category) in enumerate(available_counts):
+                if remaining_slots > 0:
+                    bonus = min(remaining_slots, count - category_allocations[category])
+                    category_allocations[category] += bonus
+                    remaining_slots -= bonus
+            
+            # Select articles from each category according to allocation
+            for category, allocation in category_allocations.items():
+                articles = category_groups[category]
+                selected_count = min(allocation, len(articles))
+                
+                for i in range(selected_count):
+                    article = articles[i]
+                    article_tuple = (
+                        article['display_text'],
+                        article['url'],
+                        article['description'],
+                        article.get('category', 'Default')
+                    )
+                    balanced_batch.append(article_tuple)
+            
+            # Shuffle the final batch to prevent predictable category ordering
+            random.shuffle(balanced_batch)
+            
+            # Log balance information
+            category_counts = {}
+            for _, _, _, category in balanced_batch:
+                category_counts[category] = category_counts.get(category, 0) + 1
+                
+            logger.debug(f"Category-balanced batch: {dict(category_counts)} (total: {len(balanced_batch)})")
+            
+            return balanced_batch
     
     def get_article_by_criteria(self, enabled_categories: List[str], 
                                recently_shown: List[str],

@@ -42,8 +42,9 @@ except ImportError:
 class TickerGUI:
     """Main GUI class for the RSS ticker."""
     
-    def __init__(self, update_queue: queue.Queue):
+    def __init__(self, update_queue: queue.Queue, fetcher=None):
         self.update_queue = update_queue
+        self.fetcher = fetcher  # Reference to FeedFetcher for bidirectional communication
         today_str = date.today().strftime("%B %d, %Y")
         self.headlines = deque([(f"Thanks for using Easy-RSS-🐍! • {today_str} {BULLET}", "", f"Welcome to Easy-RSS-Python! Fetching the latest news from multiple sources.", "Default")])
         self.current_index = 0
@@ -355,11 +356,11 @@ class TickerGUI:
                     text_color = CATEGORY_COLORS.get(category, CATEGORY_COLORS['Default'])
                 else:
                     # No suitable article found, request fresh batch
-                    self._request_fresh_batch("no suitable articles")
+                    self._request_fresh_batch("no suitable articles", priority='high')
                     return
             else:
                 # No articles available, request fresh batch  
-                self._request_fresh_batch("no articles available")
+                self._request_fresh_batch("no articles available", priority='critical')
                 return
             
             # Add subtle category prefix for clarity
@@ -1395,13 +1396,24 @@ class TickerGUI:
         return None
     
     def _check_article_supply(self):
-        """Check if we need to request fresh articles."""
+        """Intelligent tier-aware article supply monitoring."""
         if not self.headlines:
             return
             
-        # Count suitable articles remaining
-        suitable_count = 0
         current_time = time.time()
+        dynamic_window_size = self._get_dynamic_sliding_window_size()
+        recent_urls = set(list(self.sliding_window_shown)[-dynamic_window_size:])
+        
+        # Tier-based article counting
+        tier_counts = {
+            'tier1': 0,  # Fresh articles (never shown)
+            'tier2': 0,  # Outside sliding window
+            'tier3': 0,  # In window but past cooldown
+            'tier4': 0   # All enabled articles (emergency)
+        }
+        
+        # Category-specific counts for depletion detection
+        category_counts = {}
         
         for item in self.headlines:
             if len(item) >= 4:
@@ -1410,33 +1422,117 @@ class TickerGUI:
                 text, url, description = item
                 category = 'Default'
                 
-            # Skip if category disabled or recently shown
+            # Skip if category is disabled
             if category not in self.enabled_categories:
                 continue
-            if url in self.sliding_window_shown:
-                continue
                 
-            # Check time-based availability
+            # Initialize category count
+            if category not in category_counts:
+                category_counts[category] = {'tier1': 0, 'tier2': 0, 'tier3': 0, 'tier4': 0}
+                
             last_shown = self.last_article_time.get(url, 0)
-            if current_time - last_shown < 60:  # 1 minute minimum
-                continue
-                
-            suitable_count += 1
+            time_since_shown = current_time - last_shown
+            in_recent_window = url in recent_urls
             
-        # Request fresh batch if running low
-        if suitable_count < 10:
-            self._request_fresh_batch(f"low supply: {suitable_count} suitable articles")
+            # Count for Tier 4 (all enabled articles)
+            tier_counts['tier4'] += 1
+            category_counts[category]['tier4'] += 1
             
-    def _request_fresh_batch(self, reason: str):
-        """Request fresh batch of articles from fetcher."""
-        logger.info(f"Requesting fresh article batch: {reason}")
+            # Categorize into specific tiers
+            if last_shown == 0:
+                # Tier 1: Fresh articles (never shown)
+                tier_counts['tier1'] += 1
+                category_counts[category]['tier1'] += 1
+            elif not in_recent_window:
+                # Tier 2: Outside sliding window
+                tier_counts['tier2'] += 1
+                category_counts[category]['tier2'] += 1
+            elif time_since_shown >= 120:  # 2 minute cooldown
+                # Tier 3: In window but past cooldown
+                tier_counts['tier3'] += 1
+                category_counts[category]['tier3'] += 1
         
-        # Put request in update queue for fetcher to see
-        # This uses the existing communication channel
-        if hasattr(self, 'update_queue'):
-            # For now, just log the request
-            # In future, could implement fetcher batch rotation
-            logger.debug(f"Would request fresh batch from fetcher: {reason}")
+        # Intelligent refresh decision based on tier depletion
+        self._evaluate_refresh_need(tier_counts, category_counts)
+    
+    def _evaluate_refresh_need(self, tier_counts: dict, category_counts: dict):
+        """Evaluate if refresh is needed based on tier-aware thresholds."""
+        enabled_count = len(self.enabled_categories)
+        
+        # Adaptive thresholds based on number of enabled categories
+        thresholds = {
+            'tier1_critical': max(2, enabled_count),  # At least 2, but scale with categories
+            'tier2_low': max(4, enabled_count * 2),
+            'tier3_low': max(6, enabled_count * 3),
+            'tier4_emergency': max(1, enabled_count)
+        }
+        
+        # Check for critical depletion (Tier 1)
+        if tier_counts['tier1'] < thresholds['tier1_critical']:
+            self._request_fresh_batch(
+                f"Tier 1 depletion: {tier_counts['tier1']} fresh articles", 
+                priority='critical'
+            )
+            return
+            
+        # Check for category-specific depletion
+        for category, counts in category_counts.items():
+            if counts['tier1'] == 0 and counts['tier2'] <= 1:
+                self._request_fresh_batch(
+                    f"Category {category} nearly depleted: {counts['tier1']} fresh, {counts['tier2']} available",
+                    priority='high'
+                )
+                return
+        
+        # Check for Tier 2 depletion
+        if tier_counts['tier2'] < thresholds['tier2_low']:
+            self._request_fresh_batch(
+                f"Tier 2 low: {tier_counts['tier2']} outside-window articles",
+                priority='high'
+            )
+            return
+            
+        # Check for Tier 3 depletion
+        if tier_counts['tier3'] < thresholds['tier3_low']:
+            self._request_fresh_batch(
+                f"Tier 3 low: {tier_counts['tier3']} past-cooldown articles",
+                priority='normal'
+            )
+            return
+            
+        # Emergency check - only Tier 4 articles left
+        if tier_counts['tier1'] == 0 and tier_counts['tier2'] == 0 and tier_counts['tier3'] == 0:
+            if tier_counts['tier4'] < thresholds['tier4_emergency']:
+                self._request_fresh_batch(
+                    f"EMERGENCY: Only {tier_counts['tier4']} articles remaining",
+                    priority='critical'
+                )
+            else:
+                self._request_fresh_batch(
+                    "Only Tier 4 (emergency) articles available",
+                    priority='high'
+                )
+            return
+        
+        # Log healthy state periodically
+        total_quality = tier_counts['tier1'] + tier_counts['tier2'] + tier_counts['tier3']
+        if total_quality > 15:  # Healthy threshold
+            logger.debug(f"Article supply healthy: T1:{tier_counts['tier1']} T2:{tier_counts['tier2']} T3:{tier_counts['tier3']}")
+            
+    def _request_fresh_batch(self, reason: str, priority: str = 'normal'):
+        """Request fresh batch of articles from fetcher with intelligent priority."""
+        logger.info(f"Requesting fresh article batch: {reason} (priority: {priority})")
+        
+        if self.fetcher:
+            # Send request to fetcher with enabled categories for targeted refresh
+            enabled_cats = list(self.enabled_categories) if hasattr(self, 'enabled_categories') else []
+            self.fetcher.request_refresh(
+                priority=priority,
+                reason=reason,
+                categories=enabled_cats
+            )
+        else:
+            logger.warning("No fetcher reference available for refresh request")
     
     def request_fresh_articles(self):
         """Legacy method - now redirects to smart batch request."""
