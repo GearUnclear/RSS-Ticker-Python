@@ -113,8 +113,11 @@ NEW_ARTICLE_PRIORITY = 100          # Priority score for newly fetched articles
 PRIORITY_DECAY_HOURS = 2            # Hours for priority to naturally decay
 MIN_COOLDOWN_CYCLES = 5             # Minimum cycles before reshowing an article (increased to prevent repeats)
 
+# Title Display Settings
+MAX_DISPLAY_CHARS = 200             # Maximum characters for a headline before truncation
+
 # ============================================================================
-# DISPLAY SETTINGS  
+# DISPLAY SETTINGS
 # ============================================================================
 SCROLL_DELAY_MS = 30          # Slower for Windows stability
 PIXELS_PER_STEP = 2           # Slightly faster movement

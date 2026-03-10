@@ -10,6 +10,7 @@ import queue
 import random
 import asyncio
 import concurrent.futures
+import heapq
 from datetime import datetime, timedelta
 from typing import List, Tuple, Optional, Dict
 from collections import deque
@@ -62,7 +63,13 @@ class FeedFetcher:
         
         # Global sliding window for cross-session continuity
         self.global_shown_articles = deque(maxlen=200)  # Track 200 recent articles globally
-        
+
+        # Request history for adaptive timing analysis
+        self.request_history = deque(maxlen=100)
+
+        # Feed health tracking
+        self.feed_health = {}
+
         # Long-term article memory across sessions
         self.article_memory = ArticleMemory()
         logger.info(f"Article memory initialized: {self.article_memory.get_memory_stats()}")
@@ -267,17 +274,40 @@ class FeedFetcher:
             logger.info(f"Fetching feed: {feed_url}")
             feed_data = self._fetch_feed(feed_url)
             entries = self._parse_feed(feed_data)
-            
+
             # Add category to each entry
             category = self._extract_category_from_url(feed_url)
             categorized_entries = [(text, url, desc, category) for text, url, desc in entries]
-            
+
+            # Record feed health - success
+            prev = self.feed_health.get(feed_url, {})
+            self.feed_health[feed_url] = {
+                'status': 'ok',
+                'last_success': time.time(),
+                'article_count': len(entries),
+                'consecutive_errors': 0
+            }
+
             logger.info(f"Fetched {len(entries)} entries from {feed_url} (category: {category})")
             return (feed_url, categorized_entries)
         except (FeedFetchError, FeedParseError) as e:
+            prev = self.feed_health.get(feed_url, {})
+            self.feed_health[feed_url] = {
+                'status': 'error',
+                'last_error': str(e),
+                'consecutive_errors': prev.get('consecutive_errors', 0) + 1,
+                'last_success': prev.get('last_success', 0)
+            }
             logger.warning(f"Failed to fetch {feed_url}: {e}")
             return (feed_url, [])
         except Exception as e:
+            prev = self.feed_health.get(feed_url, {})
+            self.feed_health[feed_url] = {
+                'status': 'error',
+                'last_error': str(e),
+                'consecutive_errors': prev.get('consecutive_errors', 0) + 1,
+                'last_success': prev.get('last_success', 0)
+            }
             logger.error(f"Unexpected error fetching {feed_url}: {e}")
             return (feed_url, [])
     
@@ -495,6 +525,7 @@ class FeedFetcher:
                 'categories': categories or []
             }
             self.request_queue.put(('refresh_request', request_data))
+            self.request_history.append((time.time(), priority))
             logger.debug(f"Refresh request queued: {priority} priority")
         except Exception as e:
             logger.error(f"Failed to queue refresh request: {e}")
@@ -563,24 +594,35 @@ class FeedFetcher:
         return adaptive_sleep
     
     def _analyze_recent_requests(self) -> dict:
-        """Analyze recent refresh request patterns."""
-        # This would ideally track request history, but for now return mock data
-        # In a real implementation, we'd track timestamps and priorities of recent requests
-        return {
+        """Analyze recent refresh request patterns from the last 5 minutes."""
+        cutoff = time.time() - 300  # 5 minutes
+        counts = {
             'critical_count': 0,
             'high_count': 0,
             'normal_count': 0,
             'total_count': 0
         }
+        for timestamp, priority in self.request_history:
+            if timestamp >= cutoff:
+                counts['total_count'] += 1
+                if priority == 'critical':
+                    counts['critical_count'] += 1
+                elif priority == 'high':
+                    counts['high_count'] += 1
+                elif priority == 'normal':
+                    counts['normal_count'] += 1
+        return counts
     
     def _calculate_priority_score(self, article: Dict, adaptive_mode: bool = False) -> float:
         """
         Calculate priority score for an article based on age and display history.
-        
+
+        Must be called with article_pool_lock held (all callers acquire the lock).
+
         Args:
             article: Article dictionary with metadata
             adaptive_mode: If True, use reduced cooldown for emergency variety
-            
+
         Returns:
             Priority score (higher = more likely to be shown)
         """
@@ -641,175 +683,184 @@ class FeedFetcher:
     def _update_article_pool(self, new_articles: List[Tuple[str, str, str, str]]):
         """
         Update the article pool with new articles, maintaining priority metadata.
-        
+
         Args:
             new_articles: List of (display_text, url, description, category) tuples
         """
         now = datetime.now()
-        
-        # Track existing articles by URL to avoid duplicates
-        existing_urls = {article['url'] for article in self.article_pool}
-        
-        # Add new articles to pool
-        for display_text, url, description, category in new_articles:
-            if url not in existing_urls:
-                article = {
-                    'display_text': display_text,
-                    'url': url,
-                    'description': description,
-                    'category': category,
-                    'first_seen': now,
-                    'display_count': 0,
-                    'last_displayed_cycle': 0
-                }
-                self.article_pool.append(article)
-                logger.debug(f"Added new article to pool: {display_text[:50]}... (category: {category})")
-        
-        # Remove oldest articles if pool is too large
-        if len(self.article_pool) > ARTICLE_POOL_SIZE:
-            # Sort by priority (lowest first) and remove the lowest priority articles
-            self.article_pool.sort(key=self._calculate_priority_score)
-            removed_count = len(self.article_pool) - ARTICLE_POOL_SIZE
-            self.article_pool = self.article_pool[removed_count:]
-            logger.debug(f"Removed {removed_count} low-priority articles from pool")
-        
-        logger.info(f"Article pool updated: {len(self.article_pool)} articles total")
-        
-        # Log detailed pool statistics every 5 cycles
-        if self.display_cycle_count % 5 == 0:
-            pool_stats = self.get_pool_statistics()
+
+        with self.article_pool_lock:
+            # Track existing articles by URL to avoid duplicates
+            existing_urls = {article['url'] for article in self.article_pool}
+
+            # Add new articles to pool
+            for display_text, url, description, category in new_articles:
+                if url not in existing_urls:
+                    article = {
+                        'display_text': display_text,
+                        'url': url,
+                        'description': description,
+                        'category': category,
+                        'first_seen': now,
+                        'display_count': 0,
+                        'last_displayed_cycle': 0
+                    }
+                    self.article_pool.append(article)
+                    logger.debug(f"Added new article to pool: {display_text[:50]}... (category: {category})")
+
+            # Remove lowest-priority articles if pool is too large (heapq is O(n log k))
+            if len(self.article_pool) > ARTICLE_POOL_SIZE:
+                removed_count = len(self.article_pool) - ARTICLE_POOL_SIZE
+                self.article_pool = heapq.nlargest(
+                    ARTICLE_POOL_SIZE, self.article_pool,
+                    key=self._calculate_priority_score
+                )
+                logger.debug(f"Removed {removed_count} low-priority articles from pool")
+
+            pool_size = len(self.article_pool)
+
+            # Log detailed pool statistics every 5 cycles
+            pool_stats = None
+            if self.display_cycle_count % 5 == 0:
+                pool_stats = self._get_pool_statistics_unlocked()
+
+        logger.info(f"Article pool updated: {pool_size} articles total")
+        if pool_stats:
             logger.info(f"Pool stats: {pool_stats}")
     
     def _select_articles_for_display(self) -> List[Tuple[str, str, str, str]]:
         """
         Select articles for display using breaking news bias and priority scoring.
         Implements adaptive cooldown when running low on variety.
-        
+
         Returns:
             List of (display_text, url, description, category) tuples selected for display
         """
-        if not self.article_pool:
-            return []
-        
-        # First pass: try normal priority scoring
-        scored_articles = []
-        for article in self.article_pool:
-            score = self._calculate_priority_score(article, adaptive_mode=False)
-            if score > 0:  # Only include articles with positive priority
-                scored_articles.append((article, score))
-        
-        # Check if we need emergency variety mode (adaptive cooldown)
-        adaptive_mode = len(scored_articles) < 10  # Emergency threshold (increased)
-        
-        if adaptive_mode:
-            logger.warning(f"Emergency variety mode activated: only {len(scored_articles)} articles available")
-            # Recalculate with adaptive mode (reduced cooldown)
+        with self.article_pool_lock:
+            if not self.article_pool:
+                return []
+
+            # First pass: try normal priority scoring
             scored_articles = []
             for article in self.article_pool:
-                score = self._calculate_priority_score(article, adaptive_mode=True)
-                if score > 0:
+                score = self._calculate_priority_score(article, adaptive_mode=False)
+                if score > 0:  # Only include articles with positive priority
                     scored_articles.append((article, score))
-            logger.info(f"Adaptive mode increased available articles to: {len(scored_articles)}")
-        
-        logger.debug(f"Available articles for selection: {len(scored_articles)}/{len(self.article_pool)} (adaptive={adaptive_mode})")
-        
-        if not scored_articles:
-            logger.error("No articles available even in emergency mode - all articles exhausted")
-            # Last resort: reset display counts to allow immediate re-display
-            if len(self.article_pool) > 0:
-                logger.warning("CRITICAL: Resetting article display counts to prevent empty ticker")
-                # Reset only half of the oldest articles to spread out recycling
-                reset_count = min(DISPLAY_SUBSET_SIZE // 2, len(self.article_pool))
-                oldest_articles = sorted(self.article_pool, 
-                                        key=lambda x: x['last_displayed_cycle'])[:reset_count]
-                for article in oldest_articles:
-                    article['last_displayed_cycle'] = max(0, self.display_cycle_count - 3)  # 3 cycles ago
-                    scored_articles.append((article, 30))  # Lower priority to mix better
-                logger.info(f"Reset {len(oldest_articles)} oldest articles for emergency display")
-            
+
+            # Check if we need emergency variety mode (adaptive cooldown)
+            adaptive_mode = len(scored_articles) < 10  # Emergency threshold (increased)
+
+            if adaptive_mode:
+                logger.warning(f"Emergency variety mode activated: only {len(scored_articles)} articles available")
+                # Recalculate with adaptive mode (reduced cooldown)
+                scored_articles = []
+                for article in self.article_pool:
+                    score = self._calculate_priority_score(article, adaptive_mode=True)
+                    if score > 0:
+                        scored_articles.append((article, score))
+                logger.info(f"Adaptive mode increased available articles to: {len(scored_articles)}")
+
+            logger.debug(f"Available articles for selection: {len(scored_articles)}/{len(self.article_pool)} (adaptive={adaptive_mode})")
+
             if not scored_articles:
-                return []  # Truly no articles available
-        
-        # Sort by priority score (highest first)
-        scored_articles.sort(key=lambda x: x[1], reverse=True)
-        
-        # Apply breaking news bias
-        high_priority_slots = int(DISPLAY_SUBSET_SIZE * BREAKING_NEWS_BIAS)
-        variety_slots = DISPLAY_SUBSET_SIZE - high_priority_slots
-        
-        selected_articles = []
-        
-        # Fill high priority slots with top-scored articles (priority >= 60)
-        high_priority_candidates = [item for item in scored_articles if item[1] >= 60]
-        if high_priority_candidates:
-            # Randomize among high priority to avoid same order
-            random.shuffle(high_priority_candidates)
-            for article, score in high_priority_candidates[:high_priority_slots]:
-                selected_articles.append(article)
-        
-        # Always shuffle selected articles to prevent predictable patterns
-        random.shuffle(selected_articles)
-        
-        # Fill remaining slots with variety (weighted random selection)
-        remaining_candidates = [item for item in scored_articles 
-                              if item[0] not in selected_articles and item[1] > 0]
-        
-        if remaining_candidates and variety_slots > 0:
-            # Fill up to available slots or articles, whichever is smaller
-            slots_to_fill = min(variety_slots, len(remaining_candidates))
-            
-            if slots_to_fill > 0:
-                # Weighted random selection based on scores
-                weights = [max(score, 1) for _, score in remaining_candidates]
-                variety_articles = random.choices(
-                    [article for article, _ in remaining_candidates],
-                    weights=weights,
-                    k=slots_to_fill
-                )
-                selected_articles.extend(variety_articles)
-        
-        # Update display metadata for selected articles
-        self.display_cycle_count += 1
-        marked_urls = 0
-        
-        # Further shuffle final selection for maximum variety
-        random.shuffle(selected_articles)
-        
-        for article in selected_articles:
-            article['display_count'] += 1
-            article['last_displayed_cycle'] = self.display_cycle_count
-            
-            # Mark article in global memory
-            url = article.get('url', '')
-            if url:
-                self.article_memory.mark_article_shown(url)
-                marked_urls += 1
-            else:
-                logger.warning(f"Article missing URL: {article.get('display_text', '')[:50]}...")
-        
-        # Batch save all marked articles
+                logger.error("No articles available even in emergency mode - all articles exhausted")
+                # Last resort: reset display counts to allow immediate re-display
+                if len(self.article_pool) > 0:
+                    logger.warning("CRITICAL: Resetting article display counts to prevent empty ticker")
+                    # Reset only half of the oldest articles to spread out recycling
+                    reset_count = min(DISPLAY_SUBSET_SIZE // 2, len(self.article_pool))
+                    oldest_articles = sorted(self.article_pool,
+                                            key=lambda x: x['last_displayed_cycle'])[:reset_count]
+                    for article in oldest_articles:
+                        article['last_displayed_cycle'] = max(0, self.display_cycle_count - 3)  # 3 cycles ago
+                        scored_articles.append((article, 30))  # Lower priority to mix better
+                    logger.info(f"Reset {len(oldest_articles)} oldest articles for emergency display")
+
+                if not scored_articles:
+                    return []  # Truly no articles available
+
+            # Sort by priority score (highest first)
+            scored_articles.sort(key=lambda x: x[1], reverse=True)
+
+            # Apply breaking news bias
+            high_priority_slots = int(DISPLAY_SUBSET_SIZE * BREAKING_NEWS_BIAS)
+            variety_slots = DISPLAY_SUBSET_SIZE - high_priority_slots
+
+            selected_articles = []
+
+            # Fill high priority slots with top-scored articles (priority >= 60)
+            high_priority_candidates = [item for item in scored_articles if item[1] >= 60]
+            if high_priority_candidates:
+                # Randomize among high priority to avoid same order
+                random.shuffle(high_priority_candidates)
+                for article, score in high_priority_candidates[:high_priority_slots]:
+                    selected_articles.append(article)
+
+            # Always shuffle selected articles to prevent predictable patterns
+            random.shuffle(selected_articles)
+
+            # Fill remaining slots with variety (weighted random selection)
+            remaining_candidates = [item for item in scored_articles
+                                  if item[0] not in selected_articles and item[1] > 0]
+
+            if remaining_candidates and variety_slots > 0:
+                # Fill up to available slots or articles, whichever is smaller
+                slots_to_fill = min(variety_slots, len(remaining_candidates))
+
+                if slots_to_fill > 0:
+                    # Weighted random selection based on scores
+                    weights = [max(score, 1) for _, score in remaining_candidates]
+                    variety_articles = random.choices(
+                        [article for article, _ in remaining_candidates],
+                        weights=weights,
+                        k=slots_to_fill
+                    )
+                    selected_articles.extend(variety_articles)
+
+            # Update display metadata for selected articles
+            self.display_cycle_count += 1
+
+            # Further shuffle final selection for maximum variety
+            random.shuffle(selected_articles)
+
+            for article in selected_articles:
+                article['display_count'] += 1
+                article['last_displayed_cycle'] = self.display_cycle_count
+
+            # Collect data needed for I/O outside the lock
+            urls_to_mark = [a.get('url', '') for a in selected_articles if a.get('url')]
+            result = [(a['display_text'], a['url'], a['description'], a.get('category', 'Default'))
+                     for a in selected_articles]
+            cycle_count = self.display_cycle_count
+            scored_count = len(scored_articles)
+            high_priority_count = len([x for x in scored_articles if x[1] >= 60])
+
+        # I/O outside lock
+        for url in urls_to_mark:
+            self.article_memory.mark_article_shown(url)
         self.article_memory.flush_memory()
-        logger.debug(f"Flushed {marked_urls} articles to persistent memory")
-        
-        # Convert back to tuple format
-        result = [(article['display_text'], article['url'], article['description'], article.get('category', 'Default')) 
-                 for article in selected_articles]
-        
-        logger.info(f"Selected {len(result)} articles for display (cycle {self.display_cycle_count}, adaptive={adaptive_mode})")
-        logger.debug(f"Available for selection: {len(scored_articles)}, High priority: {len([x for x in scored_articles if x[1] >= 60])}")
-        
+        logger.debug(f"Flushed {len(urls_to_mark)} articles to persistent memory")
+
+        logger.info(f"Selected {len(result)} articles for display (cycle {cycle_count}, adaptive={adaptive_mode})")
+        logger.debug(f"Available for selection: {scored_count}, High priority: {high_priority_count}")
+
         # Log enhanced memory stats periodically
-        if self.display_cycle_count % 10 == 0:
+        if cycle_count % 10 == 0:
             memory_stats = self.article_memory.get_memory_stats()
             logger.info(f"Enhanced memory stats: {memory_stats['total_articles']} articles, "
                        f"Age: {memory_stats['age_buckets']}, "
                        f"Freq: {memory_stats['frequency_distribution']}, "
                        f"Avg: {memory_stats['avg_frequency']}")
-        
+
         return result
     
     def get_pool_statistics(self) -> Dict:
-        """Get detailed statistics about the article pool state."""
+        """Get detailed statistics about the article pool state (thread-safe)."""
+        with self.article_pool_lock:
+            return self._get_pool_statistics_unlocked()
+
+    def _get_pool_statistics_unlocked(self) -> Dict:
+        """Get pool statistics. Must be called with article_pool_lock held."""
         if not self.article_pool:
             return {
                 'total_articles': 0,
@@ -818,7 +869,7 @@ class FeedFetcher:
                 'available_articles': 0,
                 'globally_recent_articles': 0
             }
-        
+
         stats = {
             'total_articles': len(self.article_pool),
             'new_articles': 0,
@@ -826,30 +877,53 @@ class FeedFetcher:
             'available_articles': 0,
             'globally_recent_articles': 0
         }
-        
+
         for article in self.article_pool:
             url = article.get('url', '')
-            
+
             # Check if new (never displayed in current session)
             if article['display_count'] == 0:
                 stats['new_articles'] += 1
-            
+
             # Check if in session cooldown
             cycles_since = self.display_cycle_count - article['last_displayed_cycle']
             if article['display_count'] > 0 and cycles_since < MIN_COOLDOWN_CYCLES:
                 stats['articles_in_cooldown'] += 1
-            
+
             # Check if globally recent
             if self.article_memory.was_recently_shown(url):
                 stats['globally_recent_articles'] += 1
-            
+
             # Check if available (would get score > 0)
             score = self._calculate_priority_score(article, adaptive_mode=False)
             if score > 0:
                 stats['available_articles'] += 1
-        
+
         return stats
-    
+
+    def get_category_health(self) -> Dict:
+        """Aggregate feed_health by category. Returns {category: {feeds, healthy, last_success, errors}}."""
+        category_health = {}
+        for feed_url, health in self.feed_health.items():
+            category = self._extract_category_from_url(feed_url)
+            if category not in category_health:
+                category_health[category] = {
+                    'feeds': 0,
+                    'healthy_feeds': 0,
+                    'last_success': 0,
+                    'errors': []
+                }
+            cat = category_health[category]
+            cat['feeds'] += 1
+            if health.get('status') == 'ok':
+                cat['healthy_feeds'] += 1
+                cat['last_success'] = max(cat['last_success'], health.get('last_success', 0))
+            else:
+                cat['errors'].append(health.get('last_error', 'unknown'))
+                # Preserve last_success from previous successful fetch
+                cat['last_success'] = max(cat['last_success'], health.get('last_success', 0))
+        return category_health
+
     def _get_all_available_articles(self) -> List[Tuple[str, str, str, str]]:
         """Get all articles from pool in displayable format."""
         with self.article_pool_lock:
